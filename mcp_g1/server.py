@@ -36,8 +36,25 @@ QUEUE_NAME = os.getenv("REDIS_QUEUE_NAME", "policy_queue")
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
+# Streamable-HTTP can run "stateful" (client must echo back an mcp-session-id
+# header from the initialize handshake) or "stateless" (every request is
+# independent). Many MCP UI clients skip the session handshake, so we default
+# to stateless – flip to "false" if you need per-session state.
+MCP_STATELESS_HTTP = os.getenv("MCP_STATELESS_HTTP", "true").lower() in ("1", "true", "yes")
+# When true, streamable-HTTP replies with `application/json` instead of an
+# `text/event-stream` chunked response. Plain JSON is far more compatible
+# with simple clients (e.g. those that complain "MCP server closed the SSE
+# stream before responding"). Disable only if your client truly needs SSE
+# framing on the streamable-HTTP endpoint.
+MCP_JSON_RESPONSE = os.getenv("MCP_JSON_RESPONSE", "true").lower() in ("1", "true", "yes")
 
-mcp = FastMCP("g1-policy-server", host=MCP_HOST, port=MCP_PORT)
+mcp = FastMCP(
+    "g1-policy-server",
+    host=MCP_HOST,
+    port=MCP_PORT,
+    stateless_http=MCP_STATELESS_HTTP,
+    json_response=MCP_JSON_RESPONSE,
+)
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 

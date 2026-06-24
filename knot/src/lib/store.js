@@ -1,11 +1,21 @@
 import fs from "fs";
 import path from "path";
+import { bootstrapMcpServers } from "@/lib/mcpBootstrap";
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Reconcile env-declared MCP servers into the on-disk store. Idempotent and
+// safe to call repeatedly — the bootstrap module guards itself with a
+// module-level flag so this runs at most once per process.
+try {
+  bootstrapMcpServers();
+} catch (err) {
+  console.error("MCP bootstrap failed:", err);
 }
 
 export function readStore(name) {
