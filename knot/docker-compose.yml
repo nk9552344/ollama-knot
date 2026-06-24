@@ -1,0 +1,62 @@
+# =============================================================================
+# Knot — MCP Studio
+#
+# Brings up the Next.js app and an Ollama instance on a shared network.
+# The app reaches Ollama through `OLLAMA_HOST=http://ollama:11434`.
+#
+#   docker compose up --build         # first run / after code changes
+#   docker compose up                 # subsequent runs
+#   docker compose logs -f mcp-studio
+#   docker compose down               # stop (keeps the volumes)
+#   docker compose down -v            # stop and wipe model/chat data
+# =============================================================================
+
+services:
+  mcp-studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: knot:latest
+    container_name: knot
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Server-side URL used by API routes to reach Ollama.
+      OLLAMA_HOST: http://ollama:11434
+      DATA_DIR: /app/data
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      # Persist chats / MCP servers / system prompts across container restarts.
+      - ./data:/app/data
+    depends_on:
+      ollama:
+        condition: service_started
+    networks:
+      - knot
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - knot
+    # Uncomment to give Ollama access to the host GPU (NVIDIA + nvidia-container-toolkit).
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama_data:
+
+networks:
+  knot:
+    driver: bridge

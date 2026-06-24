@@ -1,9 +1,10 @@
 [
   {
-    "id": "c1a30ff2-389f-48c9-bfc7-6305f6801b04",
-    "name": "deepwiki",
+    "id": "8c038a2d-f980-470f-8210-1c1da952bde5",
+    "name": "mcp docs",
     "type": "http",
-    "url": "https://mcp.deepwiki.com/mcp",
+    "url": "https://mcp.specification.website/mcp",
+    "transport": "http",
     "command": "",
     "args": [],
     "env": {},
@@ -12,7 +13,6 @@
     "auth": {
       "type": "none"
     },
-    "createdAt": "2026-06-24T06:35:10.042Z",
-    "transport": "sse"
+    "createdAt": "2026-06-24T08:50:30.082Z"
   }
 ]

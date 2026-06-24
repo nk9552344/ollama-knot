@@ -38,6 +38,29 @@ function sseEvent(obj) {
   return `data: ${JSON.stringify(obj)}\n\n`;
 }
 
+function normaliseToolArgs(raw) {
+  // Ollama's `/api/chat` expects tool_calls[].function.arguments to be a
+  // JSON OBJECT (not a JSON-encoded string the way OpenAI does it). If we
+  // send a string, Ollama tries to interpret it as the schema-typed object
+  // and returns:
+  //   {"error":"Value looks like object, but can't find closing '}' symbol"}
+  // So normalise every shape we might get from storage or upstream into
+  // a plain object.
+  if (raw == null) return {};
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return {};
+    try {
+      const parsed = JSON.parse(s);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof raw === "object") return raw;
+  return {};
+}
+
 function expandMessagesForOllama(messages) {
   // Strip client-only fields (`thinking`, `_meta`) before sending.
   return messages.map((m) => {
@@ -48,10 +71,8 @@ function expandMessagesForOllama(messages) {
         type: tc.type || "function",
         function: {
           name: tc.function?.name,
-          arguments:
-            typeof tc.function?.arguments === "string"
-              ? tc.function.arguments
-              : JSON.stringify(tc.function?.arguments || {}),
+          // Object (Ollama format) — not a JSON-encoded string.
+          arguments: normaliseToolArgs(tc.function?.arguments),
         },
       }));
     }
@@ -81,14 +102,6 @@ function applySystemPrompt(messages, systemPromptContent) {
     ];
   }
   return [{ role: "system", content: systemPromptContent }, ...messages];
-}
-
-function safeJsonParse(s) {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return {};
-  }
 }
 
 /**
@@ -368,6 +381,8 @@ export async function POST(request) {
           if (turnToolCalls.length === 0) break;
 
           // --- Execute tool calls, add results to the messages array -----
+          // Note: `arguments` must be a JSON OBJECT for Ollama — not a
+          // JSON-encoded string. Same reason as in expandMessagesForOllama.
           const assistantToolMsg = {
             role: "assistant",
             content: turnContent,
@@ -376,10 +391,7 @@ export async function POST(request) {
               type: tc.type || "function",
               function: {
                 name: tc.function?.name,
-                arguments:
-                  typeof tc.function?.arguments === "string"
-                    ? tc.function.arguments
-                    : JSON.stringify(tc.function?.arguments || {}),
+                arguments: normaliseToolArgs(tc.function?.arguments),
               },
             })),
           };
@@ -387,10 +399,8 @@ export async function POST(request) {
 
           for (const tc of assistantToolMsg.tool_calls) {
             const fnName = tc.function.name;
-            const fnArgs =
-              typeof tc.function.arguments === "string"
-                ? safeJsonParse(tc.function.arguments)
-                : tc.function.arguments || {};
+            // arguments is already an object after normalisation above.
+            const fnArgs = tc.function.arguments || {};
 
             const mapping = toolMap.get(fnName);
             const displayName = mapping?.displayName || fnName;

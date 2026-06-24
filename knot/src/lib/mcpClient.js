@@ -26,7 +26,7 @@ import { buildAuthHeaders } from "@/lib/mcpAuth";
 const PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_INFO = { name: "MCP Studio", version: "0.1.0" };
 const REQUEST_TIMEOUT_MS = 30_000;
-const ENDPOINT_DISCOVERY_TIMEOUT_MS = 10_000;
+const ENDPOINT_DISCOVERY_TIMEOUT_MS = 20_000;
 
 function authHeaders(server) {
   return buildAuthHeaders(server?.auth) || {};
@@ -56,53 +56,26 @@ function transportFromUrl(server) {
 }
 
 /**
- * Probe the URL with GET and check whether the server speaks SSE. We send
- * `Accept: text/event-stream` so any well-behaved Streamable HTTP server
- * either 405s (POST-only) or returns a non-SSE content type — both of
- * which keep us on the HTTP path.
- */
-async function probeTransport(server) {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
-    const probe = await fetch(server.url, {
-      method: "GET",
-      headers: {
-        Accept: "text/event-stream",
-        ...authHeaders(server),
-      },
-      signal: controller.signal,
-    }).finally(() => clearTimeout(timer));
-
-    const ct = (probe.headers.get("content-type") || "").toLowerCase();
-    try {
-      await probe.body?.cancel();
-    } catch {
-      /* ignore */
-    }
-    if (probe.ok && ct.includes("text/event-stream")) return "sse";
-  } catch {
-    /* probe failed — fall back to URL heuristic */
-  }
-  return null;
-}
-
-/**
  * Resolve the transport to use. Order of precedence:
  *   1. explicit `transport` field on the server config
- *   2. URL path heuristic (`/sse` ⇒ sse, `/mcp` ⇒ http)
- *   3. live probe (GET → text/event-stream?)
- *   4. default: Streamable HTTP
+ *   2. URL path heuristic (`/mcp` ⇒ http)
+ *   3. default: Streamable HTTP   (we will auto-fall-back to legacy SSE
+ *      from runWithTransport if the HTTP attempt returns the tell-tale
+ *      "closed the SSE stream" signature — that's both faster and more
+ *      reliable than a URL guess, especially for servers whose `/sse`
+ *      endpoint actually speaks Streamable HTTP.)
  */
 async function resolveTransport(server) {
   const explicit = transportOverride(server);
   if (explicit) return explicit;
 
   const fromUrl = transportFromUrl(server);
-  if (fromUrl) return fromUrl;
-
-  const probed = await probeTransport(server);
-  if (probed) return probed;
+  // Only honour the `/mcp` hint. We deliberately do NOT honour `/sse` here
+  // because some servers advertise that path but actually serve the newer
+  // Streamable HTTP transport on it. The HTTP→SSE fallback below covers
+  // genuine legacy servers without paying the 20s SSE-discovery cost up
+  // front.
+  if (fromUrl === "http") return fromUrl;
 
   return "http";
 }
@@ -142,7 +115,7 @@ async function postJsonRpcOnce(server, payload, { sessionId, timeoutMs } = {}) {
   return response;
 }
 
-async function readJsonRpcReply(response, expectedId) {
+async function readJsonRpcReply(response, expectedId, { timeoutMs } = {}) {
   // Notifications return 202 Accepted with no body.
   if (response.status === 202) return null;
 
@@ -158,40 +131,64 @@ async function readJsonRpcReply(response, expectedId) {
     const decoder = new TextDecoder();
     let buffer = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    // The outer request's AbortController timer was cleared as soon as
+    // `fetch` resolved with the headers, so the body read needs its own
+    // timeout — otherwise an SSE response that never produces our reply
+    // (e.g. a server that actually wants the legacy SSE transport) hangs
+    // here indefinitely.
+    let timedOut = false;
+    const sseTimer = setTimeout(() => {
+      timedOut = true;
+      try {
+        reader.cancel();
+      } catch {
+        /* ignore */
+      }
+    }, timeoutMs ?? REQUEST_TIMEOUT_MS);
 
-      let sep;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const rawEvent = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-        const dataLines = rawEvent
-          .split("\n")
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).trim());
-        if (dataLines.length === 0) continue;
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const rawEvent = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
 
-        let parsed;
-        try {
-          parsed = JSON.parse(dataLines.join("\n"));
-        } catch {
-          continue;
-        }
+          const dataLines = rawEvent
+            .split("\n")
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).trim());
+          if (dataLines.length === 0) continue;
 
-        if (parsed && parsed.id === expectedId) {
+          let parsed;
           try {
-            reader.cancel().catch(() => {});
+            parsed = JSON.parse(dataLines.join("\n"));
           } catch {
-            /* ignore */
+            continue;
           }
-          return parsed;
+
+          if (parsed && parsed.id === expectedId) {
+            try {
+              reader.cancel().catch(() => {});
+            } catch {
+              /* ignore */
+            }
+            return parsed;
+          }
         }
       }
+    } finally {
+      clearTimeout(sseTimer);
     }
 
+    if (timedOut) {
+      throw new Error(
+        "MCP server did not respond to JSON-RPC over the POST stream (try the legacy /sse transport)",
+      );
+    }
     throw new Error(
       "MCP server closed the SSE stream before responding (try the legacy /sse transport)",
     );
@@ -464,6 +461,14 @@ async function openSseSession(server) {
  * automatically fall back from Streamable HTTP → legacy SSE if the server
  * never sends a matching response on the POST connection (a clear sign it
  * actually wants the SSE transport).
+ *
+ * Notes:
+ *   - `initialize` failures are non-fatal: many stateless MCP servers do not
+ *     implement initialize and simply respond to tools/list and tools/call
+ *     directly. We log the error and continue without a session id.
+ *   - A literal "closed the SSE stream" failure during the HTTP initialize
+ *     still triggers the SSE fallback, because that error is a strong signal
+ *     the server actually wants the legacy transport.
  */
 async function withSession(server, fn) {
   if (server.type !== "http") {
@@ -478,15 +483,40 @@ async function withSession(server, fn) {
 
 async function runWithTransport(server, transport, fn) {
   if (transport === "sse") {
-    const session = await openSseSession(server);
+    let session;
     try {
-      await session.request("initialize", {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: CLIENT_INFO,
-      });
-      // Many servers require this notification before they will respond
-      // to tools/list. Failure is non-fatal — some servers don't require it.
+      session = await openSseSession(server);
+    } catch (err) {
+      // If the legacy SSE handshake fails (e.g. no `event: endpoint`),
+      // automatically fall back to Streamable HTTP — unless the user
+      // explicitly pinned "sse".
+      const pinned = transportOverride(server);
+      if (!pinned) {
+        try {
+          return await runWithTransport(server, "http", fn);
+        } catch (httpErr) {
+          throw new Error(
+            `MCP transport failed. SSE: ${err.message}. HTTP fallback: ${httpErr.message}`,
+          );
+        }
+      }
+      throw err;
+    }
+
+    try {
+      // Try initialize, but don't fail the whole session if the server
+      // doesn't implement it.
+      try {
+        await session.request("initialize", {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: CLIENT_INFO,
+        });
+      } catch (initErr) {
+        console.warn(
+          `MCP "${server.name}": initialize failed (continuing without): ${initErr.message}`,
+        );
+      }
       session.notify("notifications/initialized").catch(() => {});
       return await fn(session);
     } finally {
@@ -510,17 +540,23 @@ async function runWithTransport(server, transport, fn) {
       { sessionId },
     ).catch(() => {});
   } catch (err) {
-    // If the server returned an SSE stream but never produced a matching
-    // response, it's almost certainly the legacy SSE transport. Retry once
-    // automatically — unless the user explicitly pinned "http".
     const pinned = transportOverride(server);
-    const looksLikeSse = /closed the SSE stream before responding/i.test(
-      err?.message || "",
-    );
+    const looksLikeSse =
+      /closed the SSE stream before responding|did not respond to JSON-RPC over the POST stream/i.test(
+        err?.message || "",
+      );
+
+    // Strong SSE signal → switch transport entirely.
     if (!pinned && looksLikeSse) {
       return runWithTransport(server, "sse", fn);
     }
-    throw new Error(`MCP initialize failed: ${err.message}`);
+
+    // Otherwise: many stateless servers don't implement initialize at all.
+    // Don't make this fatal — proceed without a session id and let
+    // tools/list either succeed or surface a clearer error.
+    console.warn(
+      `MCP "${server.name}": initialize failed (continuing without session): ${err.message}`,
+    );
   }
 
   const adapter = {
