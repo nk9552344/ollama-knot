@@ -1,8 +1,0 @@
-available_policy_list:
-    name: "walking policy"
-    id: "walk_policy_unitree_g1"
-    description: "this policy is used to walk the unitree g1 robot. takes some input, ..."
-
-    name: "squats policy"
-    id: "squats_policy_unitree_g1"
-    description: "...
