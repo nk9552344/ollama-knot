@@ -56,6 +56,15 @@ async function checkHttp(server) {
 
     const latencyMs = Date.now() - startedAt;
     const status = response.status;
+    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+
+    // Drop the body immediately — for SSE endpoints it would otherwise
+    // stream indefinitely. We only care about the response headers.
+    try {
+      await response.body?.cancel();
+    } catch {
+      /* ignore */
+    }
 
     if (status === 401 || status === 403) {
       const wwwAuth = response.headers.get("www-authenticate") || undefined;
@@ -73,11 +82,14 @@ async function checkHttp(server) {
     }
 
     // For MCP HTTP servers, any non-5xx response means the host is alive.
+    // A `text/event-stream` content-type is a strong signal that this is the
+    // legacy SSE transport — surface that so the UI can show a hint.
     const reachable = status < 500;
     return {
       reachable,
       status,
       latencyMs,
+      transport: contentType.includes("text/event-stream") ? "sse" : undefined,
       error: reachable ? undefined : `HTTP ${status}`,
     };
   } catch (error) {

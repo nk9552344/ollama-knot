@@ -54,6 +54,9 @@ export function MCPServerForm({ isOpen, onClose, initial, onSave }) {
   const [name, setName] = useState(initial?.name || "");
   const [type, setType] = useState(initial?.type || "http");
   const [url, setUrl] = useState(initial?.url || "");
+  const [transport, setTransport] = useState(
+    initial?.transport || initial?.auth?.transport || "auto",
+  );
   const [command, setCommand] = useState(initial?.command || "");
   const [argsText, setArgsText] = useState(
     Array.isArray(initial?.args) ? initial.args.join(" ") : "",
@@ -112,6 +115,8 @@ export function MCPServerForm({ isOpen, onClose, initial, onSave }) {
         name: name.trim(),
         type,
         url: type === "http" ? url.trim() : "",
+        transport:
+          type === "http" && transport !== "auto" ? transport : null,
         command: type === "stdio" ? command.trim() : "",
         args:
           type === "stdio"
@@ -191,12 +196,31 @@ export function MCPServerForm({ isOpen, onClose, initial, onSave }) {
         />
 
         {type === "http" && (
-          <Input
-            label="URL"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://api.example.com/mcp"
-          />
+          <>
+            <Input
+              label="URL"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://api.example.com/mcp"
+            />
+            <div>
+              <Select
+                label="Transport"
+                value={transport}
+                onChange={(e) => setTransport(e.target.value)}
+                options={[
+                  { label: "Auto (detect)", value: "auto" },
+                  { label: "Streamable HTTP (/mcp)", value: "http" },
+                  { label: "Legacy SSE (/sse)", value: "sse" },
+                ]}
+              />
+              <p className="mt-1 text-[11px] text-text-muted">
+                Most modern servers use Streamable HTTP. Older servers (e.g.{" "}
+                <span className="font-mono">mcp.deepwiki.com/sse</span>) need
+                Legacy SSE. Leave on Auto unless you see a transport mismatch.
+              </p>
+            </div>
+          </>
         )}
 
         {type === "stdio" && (

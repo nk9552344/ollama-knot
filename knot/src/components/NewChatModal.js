@@ -5,6 +5,7 @@ import { Modal } from "./Modal";
 import { Select } from "./FormElements";
 import { Button } from "./Button";
 import { StatusDot } from "./StatusDot";
+import { Toggle } from "./Toggle";
 import { useStore } from "@/store";
 import { v4 as uuidv4 } from "uuid";
 import { AlertCircle } from "lucide-react";
@@ -21,6 +22,7 @@ export function NewChatModal({ isOpen, onClose }) {
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedPrompt, setSelectedPrompt] = useState("");
   const [selectedServers, setSelectedServers] = useState([]);
+  const [think, setThink] = useState(false);
 
   const ollamaOnline = ollamaHealth.status === "online";
   const activeServers = mcpServers.filter((s) => s.active);
@@ -41,6 +43,7 @@ export function NewChatModal({ isOpen, onClose }) {
       model: selectedModel,
       systemPromptId: selectedPrompt || null,
       mcpServerIds: selectedServers,
+      think,
       messages: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -51,6 +54,7 @@ export function NewChatModal({ isOpen, onClose }) {
     setSelectedModel("");
     setSelectedPrompt("");
     setSelectedServers([]);
+    setThink(false);
   };
 
   const allSelected =
@@ -160,6 +164,19 @@ export function NewChatModal({ isOpen, onClose }) {
             on the <strong>MCP Servers</strong> page to use it here.
           </div>
         ) : null}
+
+        <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-bg-overlay p-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-text-primary">
+              Enable reasoning
+            </p>
+            <p className="mt-0.5 text-[11px] text-text-muted">
+              Off by default. Turn on for reasoning models (qwen3,
+              deepseek-r1, gpt-oss, qwq…) to see the model’s thinking. Slower.
+            </p>
+          </div>
+          <Toggle checked={think} onChange={setThink} />
+        </div>
 
         <div className="flex gap-2 pt-2">
           <Button

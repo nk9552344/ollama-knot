@@ -1,41 +1,81 @@
 [
   {
-    "id": "8a673703-b9e0-4546-a00d-c035486a4ace",
-    "title": "hi",
+    "id": "baa43b29-ce07-4dc4-9d55-3ddd86354307",
+    "title": "Use DeepWiki to analyze langchain-ai/langgraph.\nHo",
     "model": "qwen3.5:0.8b",
-    "systemPromptId": null,
-    "mcpServerIds": [],
+    "systemPromptId": "f1df8fc2-29e0-49c0-af94-31d3d8bbf9ca",
+    "mcpServerIds": [
+      "c1a30ff2-389f-48c9-bfc7-6305f6801b04"
+    ],
+    "think": false,
     "messages": [
       {
         "role": "user",
-        "content": "hi"
+        "content": "Use DeepWiki to analyze langchain-ai/langgraph.\nHow does the graph execution model work internally?"
       },
       {
         "role": "assistant",
-        "content": "Hello! 👋 How can I help you today? 😊"
+        "content": "The graph execution model works by executing a sequence of stateless, sequential operations (nodes) on a graph state, executing the provided function at each node.\n*   **State Representation**: Graph states are represented as graph nodes in a graph, typically stored in memory or a graph database.\n*   **Execution Flow**: The graph execution model runs the provided function (or graph) at each node in the graph, updating the graph state accordingly.\n*   **Execution Order**: The graph node execution is executed in the order that the function specifies, often determined by node IDs or execution order in the original code.",
+        "thinking": ""
       },
       {
         "role": "user",
-        "content": "Using DeepWiki, explain how modelcontextprotocol/python-sdk implements MCP transports."
+        "content": "what are the different tools available in the deepwiki mcp server available to you"
       },
       {
         "role": "assistant",
-        "content": "\n\n_⚠ Error in input stream_"
-      },
-      {
-        "role": "user",
-        "content": "Using DeepWiki, explain how modelcontextprotocol/python-sdk implements MCP transports.\n"
-      },
-      {
-        "role": "assistant",
-        "content": "\n\n_⚠ Error in input stream_"
-      },
-      {
-        "role": "user",
-        "content": "Using DeepWiki, explain how modelcontextprotocol/python-sdk implements MCP transports.\n"
+        "content": "MCP server tools include:",
+        "thinking": ""
       }
     ],
-    "createdAt": "2026-06-24T06:12:22.657Z",
-    "updatedAt": "2026-06-24T07:00:32.125Z"
+    "createdAt": "2026-06-24T08:28:13.490Z",
+    "updatedAt": "2026-06-24T08:29:59.844Z"
+  },
+  {
+    "id": "3dd37e9b-4771-4cc5-b3dd-3c3ada70e78c",
+    "title": "what are tools available to you from the deepwiki ",
+    "model": "qwen3.5:0.8b",
+    "systemPromptId": "f1df8fc2-29e0-49c0-af94-31d3d8bbf9ca",
+    "mcpServerIds": [
+      "c1a30ff2-389f-48c9-bfc7-6305f6801b04"
+    ],
+    "think": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "what are tools available to you from the deepwiki mcp server."
+      },
+      {
+        "role": "assistant",
+        "content": "You are a precise AI assistant.\n\n* Core behavior:\n  * Give the shortest correct answer.\n  * Prefer facts over explanations.\n  * Do not add introductions, conclusions, warnings, or filler.\n  * Use\n\n_⏹ Stopped by user._",
+        "thinking": ""
+      }
+    ],
+    "createdAt": "2026-06-24T08:34:09.273Z",
+    "updatedAt": "2026-06-24T08:34:56.595Z"
+  },
+  {
+    "id": "cdab44e1-ac0f-4282-9f84-81b071c4a2e0",
+    "title": "what tools are available to use from the deepwiki ",
+    "model": "qwen3.5:0.8b",
+    "systemPromptId": "f1df8fc2-29e0-49c0-af94-31d3d8bbf9ca",
+    "mcpServerIds": [
+      "c1a30ff2-389f-48c9-bfc7-6305f6801b04",
+      "ef16f0d2-7a31-44e9-85c8-aaba48cefeba"
+    ],
+    "think": false,
+    "messages": [
+      {
+        "role": "user",
+        "content": "what tools are available to use from the deepwiki and todo manager mcp server."
+      },
+      {
+        "role": "assistant",
+        "content": "DeepWiki MCP server provides access to a Wikipedia database, while the Todo Manager MCP server provides tools to manage to-do lists and tasks.\nThese tools are available in their respective documentation and can be accessed by making specific API or MCP calls.",
+        "thinking": ""
+      }
+    ],
+    "createdAt": "2026-06-24T08:43:09.754Z",
+    "updatedAt": "2026-06-24T08:44:06.635Z"
   }
 ]

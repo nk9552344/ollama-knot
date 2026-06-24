@@ -7,11 +7,12 @@
     "command": "",
     "args": [],
     "env": {},
-    "description": "a mcp server for github repository analyzer.",
+    "description": "",
     "active": true,
     "auth": {
       "type": "none"
     },
-    "createdAt": "2026-06-24T06:35:10.042Z"
+    "createdAt": "2026-06-24T06:35:10.042Z",
+    "transport": "sse"
   }
 ]

@@ -13,6 +13,7 @@ export const useStore = create((set, get) => ({
   streamingChatId: null, // id of the chat currently being streamed
   streamAbortController: null,
   pendingInputText: null, // when set, ChatInput pulls it into the textarea
+  mcpStreamStatus: {}, // { [chatId]: { [serverName]: { status, message?, toolCount? } } }
 
   // Data state
   mcpServers: [],
@@ -141,6 +142,186 @@ export const useStore = create((set, get) => ({
     set({ chats });
   },
 
+  /**
+   * Streaming-friendly assistant updater. Accepts a delta object
+   * { content?: string, thinking?: string } and appends each field to the
+   * trailing assistant message — creating it lazily on the first chunk.
+   */
+  appendAssistantStream: (chatId, delta = {}) => {
+    const { content = "", thinking = "" } = delta;
+    if (!content && !thinking) return;
+
+    const chat = get().chats.find((c) => c.id === chatId);
+    if (!chat) return;
+
+    const messages = [...chat.messages];
+    let lastMsg = messages[messages.length - 1];
+    // Only the *current* assistant turn should accumulate — if the last
+    // message is a tool call/result, start a new assistant message.
+    const canExtend =
+      lastMsg &&
+      lastMsg.role === "assistant" &&
+      !(Array.isArray(lastMsg.tool_calls) && lastMsg.tool_calls.length > 0);
+    if (!canExtend) {
+      lastMsg = { role: "assistant", content: "", thinking: "" };
+      messages.push(lastMsg);
+    } else {
+      lastMsg = { ...lastMsg };
+      messages[messages.length - 1] = lastMsg;
+    }
+
+    if (content) lastMsg.content = (lastMsg.content || "") + content;
+    if (thinking) lastMsg.thinking = (lastMsg.thinking || "") + thinking;
+
+    set({
+      chats: get().chats.map((c) =>
+        c.id === chatId
+          ? { ...chat, messages, updatedAt: new Date().toISOString() }
+          : c,
+      ),
+    });
+  },
+
+  /**
+   * Records a streamed `tool_call` event. The "running" status is reflected
+   * via _meta on a newly-pushed assistant message containing the call(s).
+   * Subsequent tool_call events with the same id will update in place.
+   */
+  appendToolCallStarted: (chatId, event) => {
+    const chat = get().chats.find((c) => c.id === chatId);
+    if (!chat) return;
+
+    const messages = [...chat.messages];
+    let target = messages[messages.length - 1];
+    const isAssistantCallMsg =
+      target &&
+      target.role === "assistant" &&
+      Array.isArray(target.tool_calls) &&
+      target.tool_calls.length > 0;
+
+    if (!isAssistantCallMsg) {
+      target = {
+        role: "assistant",
+        content: "",
+        tool_calls: [],
+        _meta: { calls: {} },
+      };
+      messages.push(target);
+    } else {
+      target = {
+        ...target,
+        tool_calls: [...(target.tool_calls || [])],
+        _meta: { ...(target._meta || {}), calls: { ...(target._meta?.calls || {}) } },
+      };
+      messages[messages.length - 1] = target;
+    }
+
+    target.tool_calls.push({
+      id: event.id,
+      type: "function",
+      function: {
+        name: event.fullName,
+        arguments: JSON.stringify(event.args || {}),
+      },
+    });
+    target._meta.calls[event.id] = {
+      server: event.server,
+      displayName: event.displayName,
+      args: event.args,
+      status: "running",
+    };
+
+    set({
+      chats: get().chats.map((c) =>
+        c.id === chatId
+          ? { ...chat, messages, updatedAt: new Date().toISOString() }
+          : c,
+      ),
+    });
+  },
+
+  /**
+   * Records a streamed `tool_result` event by:
+   *   1) marking the matching tool_call on the trailing assistant message
+   *      as "success"/"error"
+   *   2) appending a real `role: "tool"` message that the model will use on
+   *      the next round
+   */
+  appendToolResult: (chatId, event) => {
+    const chat = get().chats.find((c) => c.id === chatId);
+    if (!chat) return;
+
+    const messages = [...chat.messages];
+
+    // Update the in-progress assistant message metadata.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (
+        m.role === "assistant" &&
+        m._meta?.calls &&
+        m._meta.calls[event.id]
+      ) {
+        const updated = {
+          ...m,
+          _meta: {
+            ...m._meta,
+            calls: {
+              ...m._meta.calls,
+              [event.id]: {
+                ...m._meta.calls[event.id],
+                status: event.status,
+                result: event.content,
+                error: event.error,
+              },
+            },
+          },
+        };
+        messages[i] = updated;
+        break;
+      }
+    }
+
+    // Append the real tool message Ollama needs on the next round.
+    messages.push({
+      role: "tool",
+      content: event.content || "(empty result)",
+      tool_call_id: event.id,
+      _meta: {
+        server: event.server,
+        displayName: event.displayName,
+        status: event.status,
+        error: event.error,
+      },
+    });
+
+    set({
+      chats: get().chats.map((c) =>
+        c.id === chatId
+          ? { ...chat, messages, updatedAt: new Date().toISOString() }
+          : c,
+      ),
+    });
+  },
+
+  /**
+   * Records a per-server "listing tools / ready / error" status update.
+   * Stored on a transient `mcpStreamStatus[chatId][serverName]` map and
+   * cleared at the end of the turn.
+   */
+  setMcpStreamStatus: (chatId, server, status) => {
+    const current = get().mcpStreamStatus || {};
+    const per = { ...(current[chatId] || {}) };
+    per[server] = status;
+    set({ mcpStreamStatus: { ...current, [chatId]: per } });
+  },
+  clearMcpStreamStatus: (chatId) => {
+    const current = get().mcpStreamStatus || {};
+    if (!current[chatId]) return;
+    const next = { ...current };
+    delete next[chatId];
+    set({ mcpStreamStatus: next });
+  },
+
   persistMessages: async (chatId) => {
     const chat = get().chats.find((c) => c.id === chatId);
     if (!chat) return;
@@ -178,18 +359,17 @@ export const useStore = create((set, get) => ({
   /**
    * Full chat-turn flow. Lives in the store so it is unaffected by component
    * unmount/remount — streaming continues if the user navigates away.
+   *
+   * Everything (including MCP tool discovery + invocation) runs on the
+   * server, which streams events back as SSE.
    */
   sendMessage: async (chatId, content) => {
     if (get().streamingChatId) return;
     const chat = get().chats.find((c) => c.id === chatId);
     if (!chat) return;
 
+    // Persist the user message first so the server can read it from disk.
     await get().appendMessage(chatId, { role: "user", content });
-
-    const sysPrompt = chat.systemPromptId
-      ? get().systemPrompts.find((p) => p.id === chat.systemPromptId)
-      : null;
-    const systemPromptContent = sysPrompt?.content || null;
 
     const abortController = new AbortController();
     set({
@@ -197,6 +377,7 @@ export const useStore = create((set, get) => ({
       isStreaming: true,
       streamAbortController: abortController,
     });
+    get().clearMcpStreamStatus(chatId);
 
     const finalize = async () => {
       set({
@@ -204,26 +385,56 @@ export const useStore = create((set, get) => ({
         isStreaming: false,
         streamAbortController: null,
       });
+      get().clearMcpStreamStatus(chatId);
       await get().persistMessages(chatId);
     };
 
-    try {
-      // Use the latest messages (which now include the new user msg).
-      const liveChat = get().chats.find((c) => c.id === chatId);
-      const messages = liveChat?.messages || [];
+    let receivedAnything = false;
 
+    try {
       await streamChat({
-        model: chat.model,
-        messages,
-        systemPromptContent,
+        chatId,
         signal: abortController.signal,
-        onChunk: (token) => {
-          get().updateLastAssistantMessage(
-            chatId,
-            (prev) => (prev || "") + token,
-          );
+        onEvent: (event) => {
+          switch (event.type) {
+            case "content":
+              receivedAnything = true;
+              get().appendAssistantStream(chatId, { content: event.delta });
+              break;
+            case "thinking":
+              receivedAnything = true;
+              get().appendAssistantStream(chatId, { thinking: event.delta });
+              break;
+            case "tool_call":
+              receivedAnything = true;
+              get().appendToolCallStarted(chatId, event);
+              break;
+            case "tool_result":
+              receivedAnything = true;
+              get().appendToolResult(chatId, event);
+              break;
+            case "mcp_status":
+              get().setMcpStreamStatus(chatId, event.server, {
+                status: event.status,
+                message: event.message,
+                toolCount: event.toolCount,
+              });
+              break;
+            case "new_turn":
+              // No-op on the client — the store auto-creates a fresh
+              // assistant bubble on the next content/thinking event.
+              break;
+            default:
+              break;
+          }
         },
         onDone: async () => {
+          if (!receivedAnything) {
+            get().appendAssistantStream(chatId, {
+              content:
+                "_⚠ The model returned no content. The model may not support tool calling, or no MCP tools were available._",
+            });
+          }
           await finalize();
         },
         onError: async (error) => {
@@ -231,10 +442,7 @@ export const useStore = create((set, get) => ({
           const suffix = isAbort
             ? "\n\n_⏹ Stopped by user._"
             : `\n\n_⚠ ${error?.message || "Stream failed"}_`;
-          get().updateLastAssistantMessage(
-            chatId,
-            (prev) => (prev || "") + suffix,
-          );
+          get().appendAssistantStream(chatId, { content: suffix });
           await finalize();
         },
       });

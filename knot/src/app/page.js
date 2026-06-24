@@ -33,6 +33,9 @@ function ChatPageInner() {
   const ollamaHealth = useStore((s) => s.ollamaHealth);
   const sendMessage = useStore((s) => s.sendMessage);
   const cancelStreaming = useStore((s) => s.cancelStreaming);
+  const mcpStreamStatus = useStore(
+    (s) => s.mcpStreamStatus?.[activeChatId] || null,
+  );
 
   const [showNewChatModal, setShowNewChatModal] = useState(isNewChat);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -41,12 +44,13 @@ function ChatPageInner() {
   const activeChat = chats.find((c) => c.id === activeChatId);
   const isStreamingThisChat = streamingChatId === activeChatId;
 
-  // Show thinking dots while we are streaming THIS chat but no token has
-  // arrived yet (last message is still the user's).
+  // Show thinking dots only while we are streaming THIS chat and the model
+  // hasn't emitted anything yet (no content AND no reasoning tokens).
   const lastMsg = activeChat?.messages?.[activeChat?.messages?.length - 1];
   const showThinking =
     isStreamingThisChat &&
-    (lastMsg?.role !== "assistant" || !lastMsg?.content);
+    (lastMsg?.role !== "assistant" ||
+      (!lastMsg?.content && !lastMsg?.thinking));
 
   useEffect(() => {
     if (isNewChat) {
@@ -56,7 +60,12 @@ function ChatPageInner() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeChat?.messages?.length, lastMsg?.content, showThinking]);
+  }, [
+    activeChat?.messages?.length,
+    lastMsg?.content,
+    lastMsg?.thinking,
+    showThinking,
+  ]);
 
   const closeNewChatModal = () => {
     setShowNewChatModal(false);
@@ -235,6 +244,36 @@ function ChatPageInner() {
       </div>
 
       {/* Input */}
+      {mcpStreamStatus && Object.keys(mcpStreamStatus).length > 0 && (
+        <div className="border-t border-border bg-bg-raised px-4 py-1.5">
+          <div className="mx-auto flex max-w-4xl flex-wrap gap-1.5 text-[11px]">
+            {Object.entries(mcpStreamStatus).map(([server, info]) => {
+              const tone =
+                info.status === "ready"
+                  ? "text-status-green"
+                  : info.status === "error"
+                    ? "text-status-red"
+                    : "text-text-secondary";
+              return (
+                <span
+                  key={server}
+                  title={info.message || info.status}
+                  className={`inline-flex items-center gap-1 rounded-full bg-bg-overlay px-2 py-0.5 ${tone}`}
+                >
+                  <span className="font-mono">{server}</span>
+                  <span className="text-text-muted">·</span>
+                  <span>
+                    {info.status === "listing" && "discovering tools…"}
+                    {info.status === "ready" &&
+                      `${info.toolCount ?? 0} tools ready`}
+                    {info.status === "error" && (info.message || "failed")}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <ChatInput
         onSend={handleSendMessage}
         onCancel={handleCancel}

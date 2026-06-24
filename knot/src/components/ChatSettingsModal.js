@@ -5,6 +5,7 @@ import { Modal } from "./Modal";
 import { Select } from "./FormElements";
 import { Button } from "./Button";
 import { StatusDot } from "./StatusDot";
+import { Toggle } from "./Toggle";
 import { useStore } from "@/store";
 
 /**
@@ -19,6 +20,7 @@ export function ChatSettingsModal({ chat, isOpen, onClose }) {
 
   const [systemPromptId, setSystemPromptId] = useState("");
   const [selectedServers, setSelectedServers] = useState([]);
+  const [think, setThink] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const activeServers = mcpServers.filter((s) => s.active);
@@ -27,6 +29,7 @@ export function ChatSettingsModal({ chat, isOpen, onClose }) {
     if (!isOpen || !chat) return;
     setSystemPromptId(chat.systemPromptId || "");
     setSelectedServers(chat.mcpServerIds || []);
+    setThink(chat.think === true);
   }, [isOpen, chat]);
 
   if (!chat) return null;
@@ -54,6 +57,7 @@ export function ChatSettingsModal({ chat, isOpen, onClose }) {
       await updateChat(chat.id, {
         systemPromptId: systemPromptId || null,
         mcpServerIds: selectedServers,
+        think,
         updatedAt: new Date().toISOString(),
       });
       onClose();
@@ -134,6 +138,20 @@ export function ChatSettingsModal({ chat, isOpen, onClose }) {
             page to use it here.
           </div>
         ) : null}
+
+        <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-bg-overlay p-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-text-primary">
+              Enable reasoning
+            </p>
+            <p className="mt-0.5 text-[11px] text-text-muted">
+              When on, models that support reasoning (qwen3, deepseek-r1,
+              gpt-oss, qwq…) will think before responding. Off by default for
+              speed.
+            </p>
+          </div>
+          <Toggle checked={think} onChange={setThink} />
+        </div>
 
         <div className="flex gap-2 pt-2">
           <Button

@@ -1,77 +1,36 @@
+# -------- STAGE 1: Build --------
+FROM node:18-alpine AS builder
 
-  Client Component Browser:
-    ./src/components/ChatInput.js [Client Component Browser]
-    ./src/app/page.js [Client Component Browser]
-    ./src/app/page.js [Server Component]
+WORKDIR /app
 
-  Client Component SSR:
-    ./src/components/ChatInput.js [Client Component SSR]
-    ./src/app/page.js [Client Component SSR]
-    ./src/app/page.js [Server Component]
+# Install dependencies
+COPY package.json package-lock.json ./
+RUN npm ci
 
+# Copy the rest of the source code
+COPY . .
 
- GET / 500 in 48ms (next.js: 14ms, application-code: 35ms)
-[browser] Uncaught Error: ./src/components/ChatInput.js:211:1
-Expression expected
-  209 |     </div>
-  210 |   );
-> 211 | }
-      | ^
-  212 |
+# Build the Vite app
+RUN npm run build
 
-Parsing ecmascript source code failed
+# -------- STAGE 2: Serve --------
+FROM nginx:stable-alpine AS runner
 
-Import traces:
-  Client Component Browser:
-    ./src/components/ChatInput.js [Client Component Browser]
-    ./src/app/page.js [Client Component Browser]
-    ./src/app/page.js [Server Component]
+# Set environment variables
+ENV PORT=3000
 
-  Client Component SSR:
-    ./src/components/ChatInput.js [Client Component SSR]
-    ./src/app/page.js [Client Component SSR]
-    ./src/app/page.js [Server Component]
+# Remove default nginx site config
+RUN rm /etc/nginx/conf.d/default.conf
 
+# Copy custom nginx config
+COPY nginx.conf /etc/nginx/conf.d
 
-    at <unknown> (Error: ./src/components/ChatInput.js:211:1)
-    at <unknown> (Error: (./src/components/ChatInput.js:211:1)
-[browser] ./src/components/ChatInput.js:211:1
-Expression expected
-  209 |     </div>
-  210 |   );
-> 211 | }
-      | ^
-  212 |
+# Copy built files from the builder stage
+COPY --from=builder /app/dist /usr/share/nginx/html
 
-Parsing ecmascript source code failed
+# Expose port
+EXPOSE 3000
 
-Import traces:
-  Client Component Browser:
-    ./src/components/ChatInput.js [Client Component Browser]
-    ./src/app/page.js [Client Component Browser]
-    ./src/app/page.js [Server Component]
-
-  Client Component SSR:
-    ./src/components/ChatInput.js [Client Component SSR]
-    ./src/app/page.js [Client Component SSR]
-    ./src/app/page.js [Server Component] 
-[browser] ./src/components/ChatInput.js:211:1
-Expression expected
-  209 |     </div>
-  210 |   );
-> 211 | }
-      | ^
-  212 |
-
-Parsing ecmascript source code failed
-
-Import traces:
-  Client Component Browser:
-    ./src/components/ChatInput.js [Client Component Browser]
-    ./src/app/page.js [Client Component Browser]
-    ./src/app/page.js [Server Component]
-
-  Client Component SSR:
-    ./src/components/ChatInput.js [Client Component SSR]
-    ./src/app/page.js [Client Component SSR]
-    ./src/app/page.js [Server Component] 
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]
+Perfect. That confirms:
