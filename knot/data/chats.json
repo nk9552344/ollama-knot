@@ -1,0 +1,41 @@
+[
+  {
+    "id": "8a673703-b9e0-4546-a00d-c035486a4ace",
+    "title": "hi",
+    "model": "qwen3.5:0.8b",
+    "systemPromptId": null,
+    "mcpServerIds": [],
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "Hello! 👋 How can I help you today? 😊"
+      },
+      {
+        "role": "user",
+        "content": "Using DeepWiki, explain how modelcontextprotocol/python-sdk implements MCP transports."
+      },
+      {
+        "role": "assistant",
+        "content": "\n\n_⚠ Error in input stream_"
+      },
+      {
+        "role": "user",
+        "content": "Using DeepWiki, explain how modelcontextprotocol/python-sdk implements MCP transports.\n"
+      },
+      {
+        "role": "assistant",
+        "content": "\n\n_⚠ Error in input stream_"
+      },
+      {
+        "role": "user",
+        "content": "Using DeepWiki, explain how modelcontextprotocol/python-sdk implements MCP transports.\n"
+      }
+    ],
+    "createdAt": "2026-06-24T06:12:22.657Z",
+    "updatedAt": "2026-06-24T07:00:32.125Z"
+  }
+]

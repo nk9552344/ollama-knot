@@ -6,12 +6,17 @@ import { Layout } from "@/components/Layout";
 import { ChatMessage } from "@/components/ChatMessage";
 import { ChatInput } from "@/components/ChatInput";
 import { NewChatModal } from "@/components/NewChatModal";
+import { ChatSettingsModal } from "@/components/ChatSettingsModal";
 import { ThinkingDots } from "@/components/ThinkingDots";
 import { Button } from "@/components/Button";
 import { StatusDot } from "@/components/StatusDot";
 import { useStore } from "@/store";
-import { streamChat } from "@/lib/ollama";
-import { AlertCircle, MessageSquarePlus, Sparkles } from "lucide-react";
+import {
+  AlertCircle,
+  MessageSquarePlus,
+  Settings2,
+  Sparkles,
+} from "lucide-react";
 
 function ChatPageInner() {
   const searchParams = useSearchParams();
@@ -21,24 +26,27 @@ function ChatPageInner() {
   const chats = useStore((s) => s.chats);
   const activeChatId = useStore((s) => s.activeChatId);
   const isStreaming = useStore((s) => s.isStreaming);
-  const setIsStreaming = useStore((s) => s.setIsStreaming);
+  const streamingChatId = useStore((s) => s.streamingChatId);
   const systemPrompts = useStore((s) => s.systemPrompts);
   const mcpServers = useStore((s) => s.mcpServers);
   const mcpHealth = useStore((s) => s.mcpHealth);
   const ollamaHealth = useStore((s) => s.ollamaHealth);
-  const appendMessage = useStore((s) => s.appendMessage);
-  const updateLastAssistantMessage = useStore(
-    (s) => s.updateLastAssistantMessage,
-  );
-  const persistMessages = useStore((s) => s.persistMessages);
-  const setStreamAbortController = useStore((s) => s.setStreamAbortController);
+  const sendMessage = useStore((s) => s.sendMessage);
   const cancelStreaming = useStore((s) => s.cancelStreaming);
 
   const [showNewChatModal, setShowNewChatModal] = useState(isNewChat);
-  const [showThinking, setShowThinking] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const messagesEndRef = useRef(null);
 
   const activeChat = chats.find((c) => c.id === activeChatId);
+  const isStreamingThisChat = streamingChatId === activeChatId;
+
+  // Show thinking dots while we are streaming THIS chat but no token has
+  // arrived yet (last message is still the user's).
+  const lastMsg = activeChat?.messages?.[activeChat?.messages?.length - 1];
+  const showThinking =
+    isStreamingThisChat &&
+    (lastMsg?.role !== "assistant" || !lastMsg?.content);
 
   useEffect(() => {
     if (isNewChat) {
@@ -48,7 +56,7 @@ function ChatPageInner() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeChat?.messages?.length, showThinking]);
+  }, [activeChat?.messages?.length, lastMsg?.content, showThinking]);
 
   const closeNewChatModal = () => {
     setShowNewChatModal(false);
@@ -57,70 +65,15 @@ function ChatPageInner() {
     }
   };
 
-  const handleSendMessage = async (content) => {
+  const handleSendMessage = (content) => {
     if (!activeChat || isStreaming) return;
-
-    await appendMessage(activeChatId, { role: "user", content });
-
-    setIsStreaming(true);
-    setShowThinking(true);
-
-    let systemPromptContent = null;
-    if (activeChat.systemPromptId) {
-      const prompt = systemPrompts.find(
-        (p) => p.id === activeChat.systemPromptId,
-      );
-      systemPromptContent = prompt?.content;
-    }
-
-    const updatedChat = useStore
-      .getState()
-      .chats.find((c) => c.id === activeChatId);
-    const messages = updatedChat.messages;
-
-    const abortController = new AbortController();
-    setStreamAbortController(abortController);
-
-    try {
-      await streamChat({
-        model: activeChat.model,
-        messages,
-        systemPromptContent,
-        signal: abortController.signal,
-        onChunk: (token) => {
-          setShowThinking(false);
-          updateLastAssistantMessage(activeChatId, (prev) => (prev || "") + token);
-        },
-        onDone: async () => {
-          setShowThinking(false);
-          setIsStreaming(false);
-          setStreamAbortController(null);
-          await persistMessages(activeChatId);
-        },
-        onError: async (error) => {
-          console.error("Chat error:", error);
-          setShowThinking(false);
-          setIsStreaming(false);
-          setStreamAbortController(null);
-          const message =
-            error?.name === "AbortError"
-              ? "\n\n_⏹ Stopped by user._"
-              : `\n\n_⚠ ${error?.message || "Stream failed"}_`;
-          updateLastAssistantMessage(activeChatId, (prev) => (prev || "") + message);
-          await persistMessages(activeChatId);
-        },
-      });
-    } catch (error) {
-      console.error("Error:", error);
-      setShowThinking(false);
-      setIsStreaming(false);
-      setStreamAbortController(null);
-    }
+    // Fire-and-forget — the store owns the lifecycle, so navigating away
+    // does not interrupt the stream.
+    sendMessage(activeChatId, content);
   };
 
   const handleCancel = () => {
     cancelStreaming();
-    setShowThinking(false);
   };
 
   const buildPills = () => {
@@ -219,23 +172,33 @@ function ChatPageInner() {
           <h2 className="truncate text-sm font-medium text-text-primary">
             {activeChat.title}
           </h2>
-          <div
-            className="shrink-0"
-            title={
-              isStreaming
-                ? "Wait for response to finish"
-                : "Start a new chat"
-            }
-          >
+          <div className="flex shrink-0 gap-1">
             <Button
               variant="ghost"
               size="sm"
-              disabled={isStreaming}
-              onClick={() => setShowNewChatModal(true)}
+              onClick={() => setShowSettingsModal(true)}
+              title="Chat settings (system prompt, MCP servers)"
             >
-              <MessageSquarePlus size={14} />
-              New chat
+              <Settings2 size={14} />
+              Settings
             </Button>
+            <div
+              title={
+                isStreaming
+                  ? "Wait for response to finish"
+                  : "Start a new chat"
+              }
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={isStreaming}
+                onClick={() => setShowNewChatModal(true)}
+              >
+                <MessageSquarePlus size={14} />
+                New chat
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -275,12 +238,17 @@ function ChatPageInner() {
       <ChatInput
         onSend={handleSendMessage}
         onCancel={handleCancel}
-        disabled={isStreaming}
-        isStreaming={isStreaming}
+        disabled={isStreamingThisChat}
+        isStreaming={isStreamingThisChat}
         pills={pills}
       />
 
       <NewChatModal isOpen={showNewChatModal} onClose={closeNewChatModal} />
+      <ChatSettingsModal
+        chat={activeChat}
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+      />
     </>
   );
 }
@@ -294,3 +262,4 @@ export default function ChatPage() {
     </Layout>
   );
 }
+

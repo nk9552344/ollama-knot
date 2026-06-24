@@ -5,10 +5,25 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { Bot, Check, Copy, User } from "lucide-react";
+import { Bot, Check, Copy, CornerUpLeft, User } from "lucide-react";
+import { useStore } from "@/store";
 
-function CopyButton({ text }) {
+function ActionButton({ onClick, title, children }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="rounded p-1 text-text-muted opacity-0 transition group-hover:opacity-100 hover:bg-bg-hover hover:text-text-primary"
+    >
+      {children}
+    </button>
+  );
+}
+
+function MessageActions({ text }) {
   const [copied, setCopied] = useState(false);
+  const setPendingInputText = useStore((s) => s.setPendingInputText);
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -18,14 +33,20 @@ function CopyButton({ text }) {
       /* ignore */
     }
   };
+
+  const handleUseAsInput = () => {
+    setPendingInputText(text);
+  };
+
   return (
-    <button
-      onClick={handleCopy}
-      className="rounded p-1 text-text-muted opacity-0 transition group-hover:opacity-100 hover:bg-bg-hover hover:text-text-primary"
-      title={copied ? "Copied" : "Copy message"}
-    >
-      {copied ? <Check size={13} /> : <Copy size={13} />}
-    </button>
+    <div className="flex items-center gap-1">
+      <ActionButton onClick={handleCopy} title={copied ? "Copied" : "Copy"}>
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+      </ActionButton>
+      <ActionButton onClick={handleUseAsInput} title="Use as input">
+        <CornerUpLeft size={13} />
+      </ActionButton>
+    </div>
   );
 }
 
@@ -108,7 +129,7 @@ export function ChatMessage({ message }) {
           </div>
           {message.content && (
             <div className="mt-1">
-              <CopyButton text={message.content} />
+              <MessageActions text={message.content} />
             </div>
           )}
         </div>
@@ -118,8 +139,15 @@ export function ChatMessage({ message }) {
 
   return (
     <div className="group flex justify-end gap-3">
-      <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-accent/15 px-3.5 py-2 text-sm text-text-primary">
-        <p className="whitespace-pre-wrap break-words">{message.content}</p>
+      <div className="flex max-w-[85%] flex-col items-end">
+        <div className="rounded-2xl rounded-tr-md bg-accent/15 px-3.5 py-2 text-sm text-text-primary">
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        </div>
+        {message.content && (
+          <div className="mt-1 flex justify-end">
+            <MessageActions text={message.content} />
+          </div>
+        )}
       </div>
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-bg-active text-text-secondary">
         <User size={15} />

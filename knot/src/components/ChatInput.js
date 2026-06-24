@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Send, Square } from "lucide-react";
+import { useStore } from "@/store";
 import { StatusDot } from "./StatusDot";
 
 /**
@@ -17,6 +18,11 @@ export function ChatInput({
 }) {
   const [input, setInput] = useState("");
   const textareaRef = useRef(null);
+
+  // Allow other components (e.g. ChatMessage "Use as input") to push text
+  // into the textarea via the store.
+  const pendingInputText = useStore((s) => s.pendingInputText);
+  const setPendingInputText = useStore((s) => s.setPendingInputText);
 
   const adjustHeight = () => {
     const textarea = textareaRef.current;
@@ -36,6 +42,21 @@ export function ChatInput({
       textareaRef.current?.focus();
     }
   }, [disabled]);
+
+  useEffect(() => {
+    if (pendingInputText == null) return;
+    setInput(pendingInputText);
+    setPendingInputText(null);
+    // Defer focus + caret-to-end until React applies the value.
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+      adjustHeight();
+    });
+  }, [pendingInputText, setPendingInputText]);
 
   const handleSubmit = (e) => {
     e.preventDefault();

@@ -1,6 +1,7 @@
 "use client";
 
 import { create } from "zustand";
+import { streamChat } from "@/lib/ollama";
 
 const HEALTH_INITIAL = { status: "unknown", checkedAt: null, details: null };
 
@@ -9,7 +10,9 @@ export const useStore = create((set, get) => ({
   chats: [],
   activeChatId: null,
   isStreaming: false,
+  streamingChatId: null, // id of the chat currently being streamed
   streamAbortController: null,
+  pendingInputText: null, // when set, ChatInput pulls it into the textarea
 
   // Data state
   mcpServers: [],
@@ -165,8 +168,83 @@ export const useStore = create((set, get) => ({
         /* ignore */
       }
     }
-    set({ isStreaming: false, streamAbortController: null });
+    set({
+      isStreaming: false,
+      streamingChatId: null,
+      streamAbortController: null,
+    });
   },
+
+  /**
+   * Full chat-turn flow. Lives in the store so it is unaffected by component
+   * unmount/remount — streaming continues if the user navigates away.
+   */
+  sendMessage: async (chatId, content) => {
+    if (get().streamingChatId) return;
+    const chat = get().chats.find((c) => c.id === chatId);
+    if (!chat) return;
+
+    await get().appendMessage(chatId, { role: "user", content });
+
+    const sysPrompt = chat.systemPromptId
+      ? get().systemPrompts.find((p) => p.id === chat.systemPromptId)
+      : null;
+    const systemPromptContent = sysPrompt?.content || null;
+
+    const abortController = new AbortController();
+    set({
+      streamingChatId: chatId,
+      isStreaming: true,
+      streamAbortController: abortController,
+    });
+
+    const finalize = async () => {
+      set({
+        streamingChatId: null,
+        isStreaming: false,
+        streamAbortController: null,
+      });
+      await get().persistMessages(chatId);
+    };
+
+    try {
+      // Use the latest messages (which now include the new user msg).
+      const liveChat = get().chats.find((c) => c.id === chatId);
+      const messages = liveChat?.messages || [];
+
+      await streamChat({
+        model: chat.model,
+        messages,
+        systemPromptContent,
+        signal: abortController.signal,
+        onChunk: (token) => {
+          get().updateLastAssistantMessage(
+            chatId,
+            (prev) => (prev || "") + token,
+          );
+        },
+        onDone: async () => {
+          await finalize();
+        },
+        onError: async (error) => {
+          const isAbort = error?.name === "AbortError";
+          const suffix = isAbort
+            ? "\n\n_⏹ Stopped by user._"
+            : `\n\n_⚠ ${error?.message || "Stream failed"}_`;
+          get().updateLastAssistantMessage(
+            chatId,
+            (prev) => (prev || "") + suffix,
+          );
+          await finalize();
+        },
+      });
+    } catch (error) {
+      console.error("sendMessage error:", error);
+      await finalize();
+    }
+  },
+
+  setPendingInputText: (pendingInputText) => set({ pendingInputText }),
 
   // MCP Server actions
   fetchMcpServers: async () => {
@@ -222,6 +300,50 @@ export const useStore = create((set, get) => ({
     } catch (error) {
       console.error("Error deleting MCP server:", error);
     }
+  },
+
+  refreshMcpServerById: async (id) => {
+    try {
+      const res = await fetch(`/api/mcp-servers/${id}`);
+      if (!res.ok) return null;
+      const fresh = await res.json();
+      set({
+        mcpServers: get().mcpServers.map((s) => (s.id === id ? fresh : s)),
+      });
+      return fresh;
+    } catch (error) {
+      console.error("Error refreshing MCP server:", error);
+      return null;
+    }
+  },
+
+  clearMcpOauthTokens: async (id) => {
+    try {
+      const res = await fetch(`/api/mcp-servers/${id}/oauth/clear`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      await get().refreshMcpServerById(id);
+      await get().checkMcpServerHealth(id);
+    } catch (error) {
+      console.error("Error clearing OAuth tokens:", error);
+      throw error;
+    }
+  },
+
+  refreshMcpOauthToken: async (id) => {
+    const res = await fetch(`/api/mcp-servers/${id}/oauth/refresh`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    await get().refreshMcpServerById(id);
+    await get().checkMcpServerHealth(id);
   },
 
   // System Prompt actions
@@ -337,44 +459,65 @@ export const useStore = create((set, get) => ({
   },
 
   checkMcpServerHealth: async (id) => {
-    const current = get().mcpHealth[id] || {};
-    set({
-      mcpHealth: {
-        ...get().mcpHealth,
-        [id]: { ...current, status: "checking" },
-      },
-    });
-    try {
-      const res = await fetch(`/api/mcp-servers/${id}/health`, {
-        cache: "no-store",
+    const prev = get().mcpHealth[id] || {};
+    // Only show a "checking" pulse the very first time we look at this
+    // server — subsequent polls keep the previous status to avoid flicker.
+    if (!prev.status || prev.status === "unknown") {
+      set({
+        mcpHealth: {
+          ...get().mcpHealth,
+          [id]: { ...prev, status: "checking" },
+        },
       });
-      const data = await res.json();
-      const status = data.reachable
-        ? "online"
-        : data.disabled
-          ? "disabled"
-          : "offline";
+    }
+
+    const writeResult = (status, details, failureCount = 0) => {
       set({
         mcpHealth: {
           ...get().mcpHealth,
           [id]: {
             status,
             checkedAt: new Date().toISOString(),
-            details: data,
+            details,
+            failureCount,
           },
         },
       });
+    };
+
+    try {
+      const res = await fetch(`/api/mcp-servers/${id}/health`, {
+        cache: "no-store",
+      });
+      const data = await res.json();
+
+      if (data.disabled) {
+        writeResult("disabled", data);
+        return;
+      }
+      if (data.reachable) {
+        writeResult("online", data);
+        return;
+      }
+
+      // Hysteresis: if we were online, require 2 consecutive failures before
+      // flipping to offline. This avoids flapping from a single slow probe.
+      const failures = (prev.failureCount || 0) + 1;
+      const wasOnline = prev.status === "online";
+      if (wasOnline && failures < 2) {
+        writeResult("online", { ...data, tentative: true }, failures);
+      } else {
+        writeResult("offline", data, failures);
+      }
     } catch (error) {
-      set({
-        mcpHealth: {
-          ...get().mcpHealth,
-          [id]: {
-            status: "offline",
-            checkedAt: new Date().toISOString(),
-            details: { error: error.message },
-          },
-        },
-      });
+      const failures = (prev.failureCount || 0) + 1;
+      const wasOnline = prev.status === "online";
+      const details = { error: error.message };
+      if (wasOnline && failures < 2) {
+        writeResult("online", { ...details, tentative: true }, failures);
+      } else {
+        writeResult("offline", details, failures);
+      }
     }
   },
 

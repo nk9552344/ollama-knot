@@ -3,20 +3,74 @@
 import { useState } from "react";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/Button";
-import { Input, Textarea, Select } from "@/components/FormElements";
 import { Toggle } from "@/components/Toggle";
 import { StatusDot } from "@/components/StatusDot";
-import { Modal } from "@/components/Modal";
 import { ConfirmInline } from "@/components/ConfirmInline";
+import { MCPServerForm } from "@/components/MCPServerForm";
 import { useStore } from "@/store";
+import { runOauthPopupFlow } from "@/lib/oauthClient";
 import { v4 as uuidv4 } from "uuid";
 import {
   Edit2,
+  KeyRound,
+  Lock,
+  LogOut,
   Plus,
   RefreshCw,
   Server,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
+
+function authBadge(server, healthDetails) {
+  const auth = server.auth || { type: "none" };
+  const summary = healthDetails?.auth;
+
+  if (auth.type === "none") {
+    return { label: "No auth", tone: "muted", icon: null };
+  }
+  if (auth.type === "bearer") {
+    return {
+      label: auth.token ? "Bearer token set" : "Bearer token missing",
+      tone: auth.token ? "ok" : "warn",
+      icon: KeyRound,
+    };
+  }
+  if (auth.type === "header") {
+    const configured = auth.name && auth.value;
+    return {
+      label: configured
+        ? `Header: ${auth.name}`
+        : "Header not configured",
+      tone: configured ? "ok" : "warn",
+      icon: KeyRound,
+    };
+  }
+  if (auth.type === "oauth") {
+    const hasConfig = Boolean(
+      auth.authorizationUrl && auth.tokenUrl && auth.clientId,
+    );
+    if (!hasConfig) {
+      return {
+        label: "OAuth: incomplete config",
+        tone: "warn",
+        icon: Lock,
+      };
+    }
+    if (!auth.accessToken) {
+      return { label: "OAuth: not authenticated", tone: "warn", icon: Lock };
+    }
+    if (summary?.expired) {
+      return { label: "OAuth: token expired", tone: "warn", icon: Lock };
+    }
+    return {
+      label: "OAuth: authenticated",
+      tone: "ok",
+      icon: ShieldCheck,
+    };
+  }
+  return { label: auth.type, tone: "muted", icon: null };
+}
 
 export default function MCPServersPage() {
   const {
@@ -27,78 +81,33 @@ export default function MCPServersPage() {
     deleteMcpServer,
     checkMcpServerHealth,
     checkAllMcpServerHealth,
+    refreshMcpServerById,
+    clearMcpOauthTokens,
+    refreshMcpOauthToken,
   } = useStore();
 
   const [showModal, setShowModal] = useState(false);
-  const [editingId, setEditingId] = useState(null);
+  const [editingServer, setEditingServer] = useState(null);
   const [deleting, setDeleting] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
-
-  const [formData, setFormData] = useState({
-    name: "",
-    type: "http",
-    url: "",
-    command: "",
-    args: [],
-    env: {},
-    description: "",
-    active: true,
-  });
-
-  const [envInput, setEnvInput] = useState("");
+  const [authBusyId, setAuthBusyId] = useState(null);
+  const [authError, setAuthError] = useState({}); // { [id]: string }
 
   const handleOpenModal = (server = null) => {
-    if (server) {
-      setEditingId(server.id);
-      setFormData(server);
-      setEnvInput(
-        Object.entries(server.env || {})
-          .map(([k, v]) => `${k}=${v}`)
-          .join("\n")
-      );
-    } else {
-      setEditingId(null);
-      setFormData({
-        name: "",
-        type: "http",
-        url: "",
-        command: "",
-        args: [],
-        env: {},
-        description: "",
-        active: true,
-      });
-      setEnvInput("");
-    }
+    setEditingServer(server);
     setShowModal(true);
   };
 
-  const handleSave = async () => {
-    if (!formData.name) return;
-
-    const envObj = {};
-    envInput.split("\n").forEach((line) => {
-      const [k, v] = line.split("=");
-      if (k && v) envObj[k.trim()] = v.trim();
-    });
-
-    const data = {
-      ...formData,
-      env: envObj,
-      args: formData.args.filter((a) => a),
-    };
-
-    if (editingId) {
-      await updateMcpServer(editingId, data);
+  const handleSave = async (payload) => {
+    if (editingServer) {
+      await updateMcpServer(editingServer.id, payload);
     } else {
       await createMcpServer({
         id: uuidv4(),
-        ...data,
+        ...payload,
         createdAt: new Date().toISOString(),
       });
     }
-
-    setShowModal(false);
   };
 
   const handleDelete = async (id) => {
@@ -115,6 +124,43 @@ export default function MCPServersPage() {
   const handleToggleActive = async (server) => {
     await updateMcpServer(server.id, { active: !server.active });
     checkMcpServerHealth(server.id);
+  };
+
+  const handleAuthenticate = async (server) => {
+    setAuthError((prev) => ({ ...prev, [server.id]: null }));
+    setAuthBusyId(server.id);
+    try {
+      await runOauthPopupFlow({ server });
+      await refreshMcpServerById(server.id);
+      await checkMcpServerHealth(server.id);
+    } catch (e) {
+      setAuthError((prev) => ({ ...prev, [server.id]: e.message }));
+    } finally {
+      setAuthBusyId(null);
+    }
+  };
+
+  const handleDisconnect = async (server) => {
+    setAuthBusyId(server.id);
+    try {
+      await clearMcpOauthTokens(server.id);
+    } catch (e) {
+      setAuthError((prev) => ({ ...prev, [server.id]: e.message }));
+    } finally {
+      setAuthBusyId(null);
+    }
+  };
+
+  const handleManualRefresh = async (server) => {
+    setAuthBusyId(server.id);
+    setAuthError((prev) => ({ ...prev, [server.id]: null }));
+    try {
+      await refreshMcpOauthToken(server.id);
+    } catch (e) {
+      setAuthError((prev) => ({ ...prev, [server.id]: e.message }));
+    } finally {
+      setAuthBusyId(null);
+    }
   };
 
   const activeCount = mcpServers.filter((s) => s.active).length;
@@ -266,6 +312,103 @@ export default function MCPServersPage() {
                       </p>
                     )}
 
+                    {/* Auth row */}
+                    {(() => {
+                      const badge = authBadge(server, health?.details);
+                      const Icon = badge.icon;
+                      const toneClass =
+                        badge.tone === "ok"
+                          ? "text-status-green"
+                          : badge.tone === "warn"
+                            ? "text-accent"
+                            : "text-text-muted";
+                      const isOauth = server.auth?.type === "oauth";
+                      const hasOauthConfig =
+                        isOauth &&
+                        server.auth?.authorizationUrl &&
+                        server.auth?.tokenUrl &&
+                        server.auth?.clientId;
+                      const hasToken = isOauth && server.auth?.accessToken;
+                      const canRefreshToken =
+                        isOauth && server.auth?.refreshToken;
+                      const busy = authBusyId === server.id;
+
+                      return (
+                        <div className="mb-2 space-y-1 rounded border border-border bg-bg-overlay p-2">
+                          <div
+                            className={`flex items-center gap-1.5 text-[11px] ${toneClass}`}
+                          >
+                            {Icon ? <Icon size={12} /> : null}
+                            <span>{badge.label}</span>
+                          </div>
+                          {health?.details?.authRequired && (
+                            <p className="text-[11px] text-status-red">
+                              Server returned 401 — credentials are wrong or
+                              missing.
+                            </p>
+                          )}
+                          {authError[server.id] && (
+                            <p className="text-[11px] text-status-red">
+                              {authError[server.id]}
+                            </p>
+                          )}
+                          {isOauth && (
+                            <div className="flex flex-wrap gap-1 pt-1">
+                              {!hasToken && hasOauthConfig && (
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  onClick={() => handleAuthenticate(server)}
+                                  disabled={busy}
+                                >
+                                  <Lock size={12} />
+                                  {busy ? "Opening…" : "Authenticate"}
+                                </Button>
+                              )}
+                              {hasToken && (
+                                <>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleAuthenticate(server)}
+                                    disabled={busy}
+                                    title="Run the OAuth flow again"
+                                  >
+                                    <RefreshCw
+                                      size={12}
+                                      className={busy ? "animate-spin" : ""}
+                                    />
+                                    Re-auth
+                                  </Button>
+                                  {canRefreshToken && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => handleManualRefresh(server)}
+                                      disabled={busy}
+                                      title="Use refresh_token to get a new access_token"
+                                    >
+                                      Refresh token
+                                    </Button>
+                                  )}
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => handleDisconnect(server)}
+                                    disabled={busy}
+                                    className="text-status-red hover:bg-status-red/10"
+                                  >
+                                    <LogOut size={12} />
+                                    Disconnect
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     <div className="mt-auto flex items-center justify-between gap-2 pt-2">
                       <Toggle
                         checked={server.active}
@@ -313,105 +456,12 @@ export default function MCPServersPage() {
         </div>
       </div>
 
-      {/* Modal */}
-      <Modal
+      <MCPServerForm
         isOpen={showModal}
         onClose={() => setShowModal(false)}
-        title={editingId ? "Edit MCP Server" : "Add MCP Server"}
-      >
-        <div className="space-y-4">
-          <Input
-            label="Name"
-            value={formData.name}
-            onChange={(e) =>
-              setFormData({ ...formData, name: e.target.value })
-            }
-            placeholder="e.g. GitHub API"
-          />
-
-          <Select
-            label="Type"
-            value={formData.type}
-            onChange={(e) =>
-              setFormData({ ...formData, type: e.target.value })
-            }
-            options={[
-              { label: "HTTP", value: "http" },
-              { label: "STDIO", value: "stdio" },
-            ]}
-          />
-
-          {formData.type === "http" && (
-            <Input
-              label="URL"
-              value={formData.url}
-              onChange={(e) =>
-                setFormData({ ...formData, url: e.target.value })
-              }
-              placeholder="http://localhost:3000"
-            />
-          )}
-
-          {formData.type === "stdio" && (
-            <>
-              <Input
-                label="Command"
-                value={formData.command}
-                onChange={(e) =>
-                  setFormData({ ...formData, command: e.target.value })
-                }
-                placeholder="node"
-              />
-
-              <Textarea
-                label="Environment Variables"
-                value={envInput}
-                onChange={(e) => setEnvInput(e.target.value)}
-                placeholder="KEY=VALUE&#10;KEY2=VALUE2"
-                rows={4}
-              />
-            </>
-          )}
-
-          <Textarea
-            label="Description"
-            value={formData.description}
-            onChange={(e) =>
-              setFormData({ ...formData, description: e.target.value })
-            }
-            placeholder="Optional description"
-            rows={2}
-          />
-
-          <div>
-            <Toggle
-              checked={formData.active}
-              onChange={(active) =>
-                setFormData({ ...formData, active })
-              }
-              label="Active"
-            />
-          </div>
-
-          <div className="flex gap-2 pt-4">
-            <Button
-              variant="primary"
-              onClick={handleSave}
-              disabled={!formData.name}
-              className="flex-1"
-            >
-              {editingId ? "Update" : "Create"}
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => setShowModal(false)}
-              className="flex-1"
-            >
-              Cancel
-            </Button>
-          </div>
-        </div>
-      </Modal>
+        initial={editingServer}
+        onSave={handleSave}
+      />
     </Layout>
   );
 }

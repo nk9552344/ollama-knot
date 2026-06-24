@@ -13,6 +13,7 @@ import {
   Sparkles,
   Boxes,
   RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { useStore } from "@/store";
 import { StatusDot } from "./StatusDot";
@@ -52,6 +53,7 @@ export function Sidebar() {
     mcpServers,
     mcpHealth,
     checkOllamaHealth,
+    streamingChatId,
   } = useStore();
   const pathname = usePathname() || "/";
   const [deleting, setDeleting] = useState(null);
@@ -180,6 +182,7 @@ export function Sidebar() {
               <div className="space-y-0.5">
                 {chats.map((chat) => {
                   const isActive = isChatPage && activeChatId === chat.id;
+                  const isStreamingHere = streamingChatId === chat.id;
                   return (
                     <div key={chat.id}>
                       <div
@@ -193,6 +196,12 @@ export function Sidebar() {
                           setSidebarOpen(false);
                         }}
                       >
+                        {isStreamingHere && (
+                          <Loader2
+                            size={12}
+                            className="shrink-0 animate-spin text-accent"
+                          />
+                        )}
                         <span className="flex-1 truncate">{chat.title}</span>
                         <button
                           onClick={(e) => {

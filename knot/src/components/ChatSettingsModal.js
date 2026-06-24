@@ -6,104 +6,81 @@ import { Select } from "./FormElements";
 import { Button } from "./Button";
 import { StatusDot } from "./StatusDot";
 import { useStore } from "@/store";
-import { v4 as uuidv4 } from "uuid";
-import { AlertCircle } from "lucide-react";
 
-export function NewChatModal({ isOpen, onClose }) {
-  const {
-    models,
-    systemPrompts,
-    mcpServers,
-    mcpHealth,
-    ollamaHealth,
-    createChat,
-  } = useStore();
-  const [selectedModel, setSelectedModel] = useState("");
-  const [selectedPrompt, setSelectedPrompt] = useState("");
+/**
+ * Lets the user change the system prompt and MCP-server selection for an
+ * existing chat. The model is immutable (chosen at chat creation).
+ */
+export function ChatSettingsModal({ chat, isOpen, onClose }) {
+  const systemPrompts = useStore((s) => s.systemPrompts);
+  const mcpServers = useStore((s) => s.mcpServers);
+  const mcpHealth = useStore((s) => s.mcpHealth);
+  const updateChat = useStore((s) => s.updateChat);
+
+  const [systemPromptId, setSystemPromptId] = useState("");
   const [selectedServers, setSelectedServers] = useState([]);
+  const [saving, setSaving] = useState(false);
 
-  const ollamaOnline = ollamaHealth.status === "online";
   const activeServers = mcpServers.filter((s) => s.active);
 
-  // Whenever the modal opens, default to "all active MCP servers selected".
   useEffect(() => {
-    if (!isOpen) return;
-    setSelectedServers(activeServers.map((s) => s.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, mcpServers.length]);
+    if (!isOpen || !chat) return;
+    setSystemPromptId(chat.systemPromptId || "");
+    setSelectedServers(chat.mcpServerIds || []);
+  }, [isOpen, chat]);
 
-  const handleStart = async () => {
-    if (!selectedModel) return;
-
-    const newChat = {
-      id: uuidv4(),
-      title: "New Chat",
-      model: selectedModel,
-      systemPromptId: selectedPrompt || null,
-      mcpServerIds: selectedServers,
-      messages: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    await createChat(newChat);
-    onClose();
-    setSelectedModel("");
-    setSelectedPrompt("");
-    setSelectedServers([]);
-  };
+  if (!chat) return null;
 
   const allSelected =
     activeServers.length > 0 &&
-    selectedServers.length === activeServers.length;
+    activeServers.every((s) => selectedServers.includes(s.id));
   const toggleAll = () => {
-    setSelectedServers(
-      allSelected ? [] : activeServers.map((s) => s.id),
-    );
+    if (allSelected) {
+      setSelectedServers(
+        selectedServers.filter(
+          (id) => !activeServers.some((s) => s.id === id),
+        ),
+      );
+    } else {
+      const next = new Set(selectedServers);
+      activeServers.forEach((s) => next.add(s.id));
+      setSelectedServers(Array.from(next));
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await updateChat(chat.id, {
+        systemPromptId: systemPromptId || null,
+        mcpServerIds: selectedServers,
+        updatedAt: new Date().toISOString(),
+      });
+      onClose();
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="New chat">
+    <Modal isOpen={isOpen} onClose={onClose} title="Chat settings">
       <div className="space-y-4">
-        {!ollamaOnline && (
-          <div className="flex items-start gap-2 rounded-md border border-status-red/30 bg-status-red/10 p-3 text-xs text-status-red">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
-            <span>
-              Ollama is unreachable. Make sure it&apos;s running before starting
-              a chat.
-            </span>
-          </div>
-        )}
-
-        {models.length === 0 && ollamaOnline && (
-          <div className="rounded-md border border-border bg-bg-overlay p-3 text-xs text-text-secondary">
-            No models installed. Visit the <strong>Models</strong> page to pull
-            one.
-          </div>
-        )}
+        <div className="rounded-md border border-border bg-bg-overlay px-3 py-2 text-xs">
+          <span className="text-text-muted">Model: </span>
+          <span className="font-mono text-text-primary">{chat.model}</span>
+          <span className="ml-2 text-text-muted">
+            (set at chat creation)
+          </span>
+        </div>
 
         <Select
-          label="Model (required)"
-          options={
-            models.length === 0
-              ? [{ label: "No models available", value: "" }]
-              : [
-                  { label: "Select a model…", value: "" },
-                  ...models.map((m) => ({ label: m.name, value: m.name })),
-                ]
-          }
-          value={selectedModel}
-          onChange={(e) => setSelectedModel(e.target.value)}
-        />
-
-        <Select
-          label="System Prompt (optional)"
+          label="System Prompt"
           options={[
             { label: "None", value: "" },
             ...systemPrompts.map((p) => ({ label: p.name, value: p.id })),
           ]}
-          value={selectedPrompt}
-          onChange={(e) => setSelectedPrompt(e.target.value)}
+          value={systemPromptId}
+          onChange={(e) => setSystemPromptId(e.target.value)}
         />
 
         {activeServers.length > 0 ? (
@@ -150,25 +127,22 @@ export function NewChatModal({ isOpen, onClose }) {
                 );
               })}
             </div>
-            <p className="text-[11px] text-text-muted">
-              Only the servers you tick here will be exposed to this chat.
-            </p>
           </div>
         ) : mcpServers.length > 0 ? (
           <div className="rounded-md border border-border bg-bg-overlay p-3 text-xs text-text-secondary">
-            All configured MCP servers are marked inactive. Toggle one active
-            on the <strong>MCP Servers</strong> page to use it here.
+            All MCP servers are inactive. Toggle one on from the MCP Servers
+            page to use it here.
           </div>
         ) : null}
 
         <div className="flex gap-2 pt-2">
           <Button
             variant="primary"
-            onClick={handleStart}
-            disabled={!selectedModel || !ollamaOnline}
+            onClick={handleSave}
+            disabled={saving}
             className="flex-1"
           >
-            Start chat
+            Save
           </Button>
           <Button variant="ghost" onClick={onClose} className="flex-1">
             Cancel

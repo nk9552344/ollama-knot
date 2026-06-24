@@ -1,0 +1,17 @@
+[
+  {
+    "id": "c1a30ff2-389f-48c9-bfc7-6305f6801b04",
+    "name": "deepwiki",
+    "type": "http",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "command": "",
+    "args": [],
+    "env": {},
+    "description": "a mcp server for github repository analyzer.",
+    "active": true,
+    "auth": {
+      "type": "none"
+    },
+    "createdAt": "2026-06-24T06:35:10.042Z"
+  }
+]
