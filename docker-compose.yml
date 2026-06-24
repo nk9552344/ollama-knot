@@ -1,0 +1,136 @@
+# =============================================================================
+# ollama-knot — full stack
+#
+# Brings up everything you need to chat with a local LLM and have it call the
+# Unitree G1 policy MCP server:
+#
+#   * mcp-studio   – the Next.js "knot" UI                  http://localhost:3000
+#   * ollama       – local LLM runtime                       http://localhost:11434
+#   * mcp-g1       – Unitree G1 policy MCP server            http://localhost:8000/mcp
+#   * redis        – queue mcp-g1 pushes policies onto       localhost:6379
+#
+# The MCP server is auto-registered in knot on first start via the
+# MCP_BOOTSTRAP_* env vars below – no UI clicks required. The bootstrap is
+# idempotent: matching is by `id`, and the user's `active` toggle is
+# preserved across restarts.
+#
+# Quick commands
+# ──────────────
+#   docker compose up --build         # first run / after code changes
+#   docker compose up -d              # detached
+#   docker compose logs -f mcp-studio
+#   docker compose down               # stop, keep volumes
+#   docker compose down -v            # stop and wipe all persisted data
+#
+# Use your own policy registry
+# ────────────────────────────
+# Either edit ./mcp_g1/policies.yaml in place (the next tool call picks it up
+# – no restart), or set POLICY_REGISTRY_FILE in a root-level .env to the
+# absolute path of your own file, e.g.
+#
+#   echo 'POLICY_REGISTRY_FILE=/abs/path/my-registry.yaml' > .env
+# =============================================================================
+
+services:
+  mcp-studio:
+    build:
+      context: ./knot
+      dockerfile: Dockerfile
+    image: knot:latest
+    container_name: knot
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # ── Ollama wiring ────────────────────────────────────────────────
+      OLLAMA_HOST: http://ollama:11434
+      DATA_DIR: /app/data
+      NEXT_TELEMETRY_DISABLED: "1"
+
+      # ── MCP server bootstrap ─────────────────────────────────────────
+      # Auto-register the mcp-g1 server on startup. Reachable across the
+      # compose network at http://mcp-g1:8000/mcp (streamable HTTP).
+      MCP_BOOTSTRAP_ID: g1-policies
+      MCP_BOOTSTRAP_NAME: unitree g1 controls
+      MCP_BOOTSTRAP_URL: http://mcp-g1:8000/mcp
+      MCP_BOOTSTRAP_TRANSPORT: http
+      MCP_BOOTSTRAP_DESCRIPTION: Queue Unitree G1 policies via Redis.
+      # For multiple servers use the JSON form instead:
+      # MCP_BOOTSTRAP_SERVERS: '[{"id":"g1","name":"...","type":"http","url":"http://mcp-g1:8000/mcp","transport":"http"}]'
+    volumes:
+      # Persist chats / MCP servers / system prompts across container restarts.
+      - ./knot/data:/app/data
+    depends_on:
+      ollama:
+        condition: service_started
+      mcp-g1:
+        condition: service_started
+    networks:
+      - knot
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - knot
+    # Uncomment to give Ollama access to the host GPU (NVIDIA + nvidia-container-toolkit).
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  mcp-g1:
+    build:
+      context: ./mcp_g1
+      dockerfile: Dockerfile
+    image: mcp-g1:latest
+    container_name: mcp-g1
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      POLICY_REGISTRY_PATH: /app/policies.yaml
+      REDIS_URL: redis://redis:6379/0
+      REDIS_QUEUE_NAME: policy_queue
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      MCP_STATELESS_HTTP: "true"
+      MCP_JSON_RESPONSE: "true"
+    volumes:
+      # Mount the registry file read-only. Edit it on the host and the next
+      # tool call picks up the change (no restart needed). Override the host
+      # path via POLICY_REGISTRY_FILE in a root-level .env.
+      - ${POLICY_REGISTRY_FILE:-./mcp_g1/policies.yaml}:/app/policies.yaml:ro
+    depends_on:
+      redis:
+        condition: service_started
+    networks:
+      - knot
+
+  redis:
+    image: redis:7-alpine
+    container_name: knot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - knot
+
+volumes:
+  ollama_data:
+  redis_data:
+
+networks:
+  knot:
+    driver: bridge

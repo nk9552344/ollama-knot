@@ -1,22 +1,17 @@
 # =============================================================================
-# Knot — MCP Studio
+# Knot — MCP Studio (standalone)
 #
-# Brings up:
-#   * mcp-studio  – the Next.js app (this repo)
-#   * ollama      – local LLM runtime
-#   * mcp-g1      – the Unitree G1 policy MCP server (../mcp_g1)
-#   * redis       – queue backing mcp-g1
+# Brings up just the Next.js app and an Ollama instance on a shared network.
+# The app reaches Ollama through `OLLAMA_HOST=http://ollama:11434`.
 #
-# The Next.js app reaches Ollama at OLLAMA_HOST=http://ollama:11434 and is
-# auto-configured with the mcp-g1 server via the MCP_BOOTSTRAP_* env vars
-# (see knot/src/lib/mcpBootstrap.js). On first start the app writes an entry
-# into data/mcp-servers.json so the UI already lists the server.
+# For the full stack (knot + ollama + mcp-g1 + redis with the MCP server
+# already wired in) use the root-level docker-compose.yml instead.
 #
 #   docker compose up --build         # first run / after code changes
 #   docker compose up                 # subsequent runs
 #   docker compose logs -f mcp-studio
 #   docker compose down               # stop (keeps the volumes)
-#   docker compose down -v            # stop and wipe model/chat/queue data
+#   docker compose down -v            # stop and wipe model/chat data
 # =============================================================================
 
 services:
@@ -34,24 +29,11 @@ services:
       OLLAMA_HOST: http://ollama:11434
       DATA_DIR: /app/data
       NEXT_TELEMETRY_DISABLED: "1"
-
-      # ── MCP bootstrap ────────────────────────────────────────────────
-      # Auto-register the mcp-g1 server on startup. Reachable across the
-      # compose network at http://mcp-g1:8000/mcp (streamable HTTP).
-      MCP_BOOTSTRAP_ID: g1-policies
-      MCP_BOOTSTRAP_NAME: unitree g1 controls
-      MCP_BOOTSTRAP_URL: http://mcp-g1:8000/mcp
-      MCP_BOOTSTRAP_TRANSPORT: http
-      MCP_BOOTSTRAP_DESCRIPTION: Queue Unitree G1 policies via Redis.
-      # For multiple servers use MCP_BOOTSTRAP_SERVERS instead, e.g.
-      # MCP_BOOTSTRAP_SERVERS: '[{"id":"g1","name":"...","type":"http","url":"http://mcp-g1:8000/mcp"}]'
     volumes:
       # Persist chats / MCP servers / system prompts across container restarts.
       - ./data:/app/data
     depends_on:
       ollama:
-        condition: service_started
-      mcp-g1:
         condition: service_started
     networks:
       - knot
@@ -75,48 +57,8 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
-  mcp-g1:
-    build:
-      context: ../mcp_g1
-      dockerfile: Dockerfile
-    image: mcp-g1:latest
-    container_name: mcp-g1
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      POLICY_REGISTRY_PATH: /app/policies.yaml
-      REDIS_URL: redis://redis:6379/0
-      REDIS_QUEUE_NAME: policy_queue
-      MCP_TRANSPORT: http
-      MCP_HOST: 0.0.0.0
-      MCP_PORT: "8000"
-      MCP_STATELESS_HTTP: "true"
-      MCP_JSON_RESPONSE: "true"
-    volumes:
-      # Mount the registry file read-only. Edit it on the host and the next
-      # tool call picks up the change (no restart needed).
-      - ../mcp_g1/policies.yaml:/app/policies.yaml:ro
-    depends_on:
-      redis:
-        condition: service_started
-    networks:
-      - knot
-
-  redis:
-    image: redis:7-alpine
-    container_name: knot-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - knot
-
 volumes:
   ollama_data:
-  redis_data:
 
 networks:
   knot:
