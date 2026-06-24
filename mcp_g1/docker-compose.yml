@@ -1,0 +1,23 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  mcp:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      POLICY_REGISTRY_PATH: /app/policies.yaml
+      REDIS_URL: redis://redis:6379/0
+      REDIS_QUEUE_NAME: policy_queue
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+    volumes:
+      # Mount the user-supplied registry file read-only.
+      # Replace ./policies.yaml on the left with the path to your own file.
+      - ./policies.yaml:/app/policies.yaml:ro
+    depends_on:
+      - redis
