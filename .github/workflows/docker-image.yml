@@ -1,1 +1,77 @@
-# test
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+  build-and-push-knot:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ==========================================================
+      # Build & Push knot image
+      # ==========================================================
+      - name: Build and Push infosys-ollama-knot
+        uses: docker/build-push-action@v6
+        with:
+          context: ./knot
+          file: ./knot/Dockerfile
+          push: true
+          tags: |
+            neerajkumar1044/infosys-ollama-knot:latest
+            neerajkumar1044/infosys-ollama-knot:${{ github.sha }}
+          cache-from: type=registry,ref=neerajkumar1044/infosys-ollama-knot:cache
+          cache-to: type=registry,ref=neerajkumar1044/infosys-ollama-knot:cache,mode=max
+
+  build-and-push-mcp-g1:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ==========================================================
+      # Build & Push mcp-g1 image
+      # ==========================================================
+      - name: Build and Push infosys-mcp-g1
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mcp_g1
+          file: ./mcp_g1/Dockerfile
+          push: true
+          tags: |
+            neerajkumar1044/infosys-mcp-g1:latest
+            neerajkumar1044/infosys-mcp-g1:${{ github.sha }}
+          cache-from: type=registry,ref=neerajkumar1044/infosys-mcp-g1:cache
+          cache-to: type=registry,ref=neerajkumar1044/infosys-mcp-g1:cache,mode=max
