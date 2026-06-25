@@ -15,7 +15,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Installs QEMU so the amd64 runner can emulate arm64/arm
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -30,16 +29,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ==========================================================
-      # Build & Push knot image — now for all platforms
-      # ==========================================================
       - name: Build and Push infosys-ollama-knot
         uses: docker/build-push-action@v6
         with:
           context: ./knot
           file: ./knot/Dockerfile
           push: true
-          # declare the target platforms here
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: |
             neerajkumar1044/infosys-ollama-knot:latest
@@ -55,7 +50,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Installs QEMU so the amd64 runner can emulate arm64/arm
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -70,16 +64,12 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ==========================================================
-      # Build & Push mcp-g1 image — now for all platforms
-      # ==========================================================
       - name: Build and Push infosys-mcp-g1
         uses: docker/build-push-action@v6
         with:
           context: ./mcp_g1
           file: ./mcp_g1/Dockerfile
           push: true
-          # declare the target platforms here
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: |
             neerajkumar1044/infosys-mcp-g1:latest
