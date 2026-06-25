@@ -148,7 +148,7 @@ else (`url`, `name`, `transport`, …) mirrors env.
 
 ---
 
-## 4. Persistent volumes
+## 4. Persistent volumes:
 
 | Volume | Holds |
 |---|---|
