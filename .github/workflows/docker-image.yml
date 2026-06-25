@@ -18,7 +18,7 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: linux/amd64,linux/arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -35,7 +35,9 @@ jobs:
           context: ./knot
           file: ./knot/Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # arm/v7 excluded: Turbopack (Next.js default bundler) does not
+          # support linux/arm/v7. arm64 covers Pi 4+, Apple Silicon, Graviton.
+          platforms: linux/amd64,linux/arm64
           tags: |
             neerajkumar1044/infosys-ollama-knot:latest
             neerajkumar1044/infosys-ollama-knot:${{ github.sha }}
@@ -70,6 +72,7 @@ jobs:
           context: ./mcp_g1
           file: ./mcp_g1/Dockerfile
           push: true
+          # Python slim supports arm/v7 fine — keeping all three platforms
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: |
             neerajkumar1044/infosys-mcp-g1:latest
