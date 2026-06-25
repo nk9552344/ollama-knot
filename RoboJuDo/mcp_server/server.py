@@ -6,14 +6,19 @@ Architecture (see docs/mcp_orchestrator.md):
         │  MCP tool call
         ▼
     server.py (this file, FastMCP over stdio)
-        │  RPUSH robojudo:commands "<cmd>"
+        │  RPUSH policy:commands "<policy_id>"
         ▼
     Redis
         ▼
     McpRedisCtrl  (inside the running RoboJuDo pipeline)
 
-The pipeline is always running a policy (loco when idle, mimic when playing),
-so chaining tools never leaves the robot uncontrolled.
+Protocol (kept deliberately narrow):
+    command_queue  — MCP RPUSHes plain policy IDs (one per execution).
+    event_queue    — controller RPUSHes JSON events with schema
+                     {"timestamp", "type", "policy_id", "message"}.
+
+The robot owns all policy scheduling and transitions. The MCP knows only about
+policy IDs; pipeline internals never leak onto the wire.
 
 Run:
     pip install fastmcp redis
@@ -39,8 +44,8 @@ REDIS_HOST = os.environ.get("ROBOJUDO_REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("ROBOJUDO_REDIS_PORT", "6379"))
 REDIS_DB = int(os.environ.get("ROBOJUDO_REDIS_DB", "0"))
 
-CMD_KEY = os.environ.get("ROBOJUDO_CMD_KEY", "policy:command")
-EVENT_KEY = os.environ.get("ROBOJUDO_EVENT_KEY", "policy:events")
+COMMAND_QUEUE = os.environ.get("ROBOJUDO_COMMAND_QUEUE", "policy:commands")
+EVENT_QUEUE = os.environ.get("ROBOJUDO_EVENT_QUEUE", "policy:events")
 
 # Same directory the McpRedisCtrl-equipped pipeline scans. Adjust via env var
 # if the server runs on a different machine from the simulator.
@@ -49,8 +54,9 @@ DEFAULT_MOTION_DIR = (
 )
 MOTION_DIR = Path(os.environ.get("ROBOJUDO_MOTION_DIR", str(DEFAULT_MOTION_DIR)))
 
-# Max time (s) to wait for a MIMIC_DONE before giving up. Pipeline auto-returns
-# to loco on max_timestep, so this is mostly an upper bound for safety.
+# Max time (s) to wait for a policy_completed event before giving up. Pipeline
+# auto-returns to loco on max_timestep, so this is mostly an upper bound for
+# safety.
 DEFAULT_MOTION_TIMEOUT_S = float(os.environ.get("ROBOJUDO_MOTION_TIMEOUT_S", "30"))
 
 
@@ -73,29 +79,27 @@ def r() -> redis.Redis:
     return _redis
 
 
-def _push(*items: str) -> None:
-    """Push one or more raw command strings to the pipeline."""
-    if not items:
-        return
-    r().rpush(CMD_KEY, *items)
-    logger.info("→ pipeline: %s", list(items))
+def _push_policy(policy_id: str) -> None:
+    """Push a single policy ID onto the command queue."""
+    r().rpush(COMMAND_QUEUE, policy_id)
+    logger.info("→ %s: %r", COMMAND_QUEUE, policy_id)
 
 
 def _drain_events() -> None:
     """Discard old events so the next wait starts from a clean slate."""
     try:
-        r().delete(EVENT_KEY)
+        r().delete(EVENT_QUEUE)
     except redis.RedisError:
         pass
 
 
 def _wait_for_event(predicate, timeout_s: float) -> dict | None:
-    """Block until an event matching predicate appears, or timeout."""
+    """Block until a JSON event matching predicate appears, or timeout."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         remaining = max(0.1, deadline - time.time())
         # BLPOP returns (key, value) or None on timeout.
-        item = r().blpop([EVENT_KEY], timeout=min(remaining, 2.0))
+        item = r().blpop([EVENT_QUEUE], timeout=min(remaining, 2.0))
         if item is None:
             continue
         _, raw = item
@@ -117,16 +121,6 @@ def _list_motion_names() -> list[str]:
     return sorted(p.stem for p in MOTION_DIR.glob("*.onnx"))
 
 
-def _motion_index(name: str) -> int:
-    names = _list_motion_names()
-    if name not in names:
-        raise ValueError(
-            f"Unknown motion {name!r}. Available: {names}. "
-            f"(Searched {MOTION_DIR}; override with ROBOJUDO_MOTION_DIR.)"
-        )
-    return names.index(name)
-
-
 # ───────────── MCP server + tools ─────────────
 
 mcp = FastMCP("robojudo")
@@ -134,8 +128,8 @@ mcp = FastMCP("robojudo")
 
 @mcp.tool()
 def list_motions() -> list[str]:
-    """List every BeyondMimic motion the robot can play. The names returned here
-    are the exact strings to pass to `play_motion`."""
+    """List every motion the robot can play. The names returned here are the
+    exact policy IDs to pass to `play_motion`."""
     return _list_motion_names()
 
 
@@ -143,9 +137,16 @@ def list_motions() -> list[str]:
 def status() -> dict:
     """Return server + pipeline reachability and the most recent pipeline events."""
     try:
-        pending_cmds = int(r().llen(CMD_KEY))
-        recent_events_raw = r().lrange(EVENT_KEY, -10, -1)
-        recent_events = [json.loads(e) for e in recent_events_raw]
+        pending_cmds = int(r().llen(COMMAND_QUEUE))
+        recent_events_raw = r().lrange(EVENT_QUEUE, -10, -1)
+        recent_events: list[dict] = []
+        for raw in recent_events_raw:
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                recent_events.append(parsed)
         ok = True
         err = None
     except Exception as e:
@@ -156,8 +157,8 @@ def status() -> dict:
     return {
         "redis_ok": ok,
         "redis_error": err,
-        "cmd_key": CMD_KEY,
-        "event_key": EVENT_KEY,
+        "command_queue": COMMAND_QUEUE,
+        "event_queue": EVENT_QUEUE,
         "pending_commands": pending_cmds,
         "recent_events": recent_events,
         "motions_available": _list_motion_names(),
@@ -165,80 +166,55 @@ def status() -> dict:
 
 
 @mcp.tool()
-def stand_loco() -> str:
-    """Force the robot back to the locomotion policy (safe standing). Use this
-    to interrupt a mimic motion or as the default 'idle' between actions."""
-    _push("[POLICY_LOCO]")
-    return "Sent [POLICY_LOCO]."
-
-
-@mcp.tool()
 def play_motion(name: str, wait: bool = True, timeout_s: float | None = None) -> str:
-    """Play a BeyondMimic motion to completion.
+    """Queue a motion for execution.
 
     Args:
-        name: motion name returned by `list_motions` (e.g. "video_017").
-        wait: if True, block until the pipeline reports MIMIC_DONE for this clip,
-              then return. If False, fire-and-forget (the next tool call should
-              still leave the robot in a safe state).
+        name: motion name returned by `list_motions` (e.g. "video_017"). This
+              is the policy ID — the robot resolves it to a policy file internally.
+        wait: if True, block until the pipeline reports `policy_completed` for
+              this clip, then return. If False, fire-and-forget.
         timeout_s: hard upper bound for `wait`. Defaults to ROBOJUDO_MOTION_TIMEOUT_S.
 
     Returns a status string describing what happened.
     """
-    idx = _motion_index(name)
+    available = _list_motion_names()
+    if available and name not in available:
+        return f"Unknown motion {name!r}. Available: {available}"
+
     timeout_s = timeout_s if timeout_s is not None else DEFAULT_MOTION_TIMEOUT_S
 
     if wait:
         _drain_events()
 
-    # SELECT:<name> is a side-channel string consumed by McpRedisCtrl so it can
-    # attach the human-readable name to the MIMIC_STARTED/MIMIC_DONE events.
-    _push(f"SELECT:{name}", f"[POLICY_SWITCH],{idx}", "[POLICY_MIMIC]")
+    _push_policy(name)
 
     if not wait:
-        return f"Started {name} (idx={idx}). Not waiting."
+        return f"Queued {name}. Not waiting."
 
     ev = _wait_for_event(
-        lambda e: e.get("event") == f"MIMIC_DONE:{name}",
+        lambda e: (
+            e.get("type") in ("policy_completed", "policy_failed")
+            and e.get("policy_id") == name
+        ),
         timeout_s=timeout_s,
     )
     if ev is None:
-        # Defensive: force back to loco so the robot is not stuck.
-        _push("[POLICY_LOCO]")
-        return f"Timed out after {timeout_s}s waiting for {name} to finish; forced [POLICY_LOCO]."
+        return f"Timed out after {timeout_s}s waiting for {name} to finish."
+    if ev.get("type") == "policy_failed":
+        return f"Failed: {ev.get('message') or 'unknown error'}"
     return f"Completed {name}."
 
 
 @mcp.tool()
 def play_sequence(names: list[str], timeout_s_per_motion: float | None = None) -> list[str]:
     """Play several motions back-to-back. Returns the per-motion status strings.
-    The robot returns to the loco policy between clips (handled by the pipeline's
-    [MOTION_DONE] → [POLICY_LOCO] auto-transition), so the chain is always safe."""
+    The robot transitions through its locomotion policy between clips — every
+    policy switch passes through loco — so the chain is always safe."""
     results = []
     for n in names:
         results.append(play_motion(n, wait=True, timeout_s=timeout_s_per_motion))
     return results
-
-
-@mcp.tool()
-def reset_motion() -> str:
-    """Restart the currently-playing motion from frame 0 without leaving mimic."""
-    _push("[MOTION_RESET]")
-    return "Sent [MOTION_RESET]."
-
-
-@mcp.tool()
-def reborn_sim() -> str:
-    """Respawn the robot in simulation (no effect on a real robot env)."""
-    _push("[SIM_REBORN]")
-    return "Sent [SIM_REBORN]."
-
-
-@mcp.tool()
-def emergency_shutdown() -> str:
-    """Stop the pipeline. Use only in genuine emergencies — it tears the run down."""
-    _push("[SHUTDOWN]")
-    return "Sent [SHUTDOWN]."
 
 
 # ───────────── Entrypoint ─────────────

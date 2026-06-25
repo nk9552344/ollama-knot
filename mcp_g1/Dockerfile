@@ -26,9 +26,8 @@ COPY server.py .
 # `docker run -e VAR=...` or docker-compose `environment:`.
 ENV POLICY_REGISTRY_PATH=/app/policies.yaml \
     REDIS_URL=redis://redis:6379/0 \
-    REDIS_QUEUE_NAME=policy:command \
-    REDIS_EVENTS_QUEUE_NAME=policy:events \
-    POLICY_MIMIC_INDEX=6 \
+    COMMAND_QUEUE_NAME=policy:commands \
+    EVENT_QUEUE_NAME=policy:events \
     MCP_TRANSPORT=http \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8000

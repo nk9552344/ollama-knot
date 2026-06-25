@@ -6,7 +6,7 @@ the Model Context Protocol.
 | Component | What it does |
 |---|---|
 | **knot** ([./knot](knot/)) | Next.js chat UI ("MCP Studio") that talks to Ollama and any number of MCP servers. |
-| **mcp-g1** ([./mcp_g1](mcp_g1/)) | Tiny Python MCP server. Exposes `list_policies`, `push_policy`, `push_policy_sequence`. Reads a user-supplied YAML registry and pushes selected policy ids onto a Redis queue. |
+| **mcp-g1** ([./mcp_g1](mcp_g1/)) | Tiny Python MCP server. Exposes `list_policies`, `execute_policy`, `wait_for_event`. Reads a user-supplied YAML registry and pushes selected policy ids onto a Redis queue. |
 | **ollama** | Local LLM runtime. Any model you pull becomes available to knot. |
 | **redis** | Queue the robot-side worker reads policy ids from. |
 
@@ -15,8 +15,9 @@ flowchart LR
     user([You]) -->|chat| knot
     knot -->|"chat/completions"| ollama
     knot -->|"MCP tools/call (HTTP)"| mcpg1[mcp-g1]
-    mcpg1 -->|RPUSH policy_queue| redis
-    robot([Robot-side worker]) -->|BLPOP policy_queue| redis
+    mcpg1 -->|"RPUSH policy:commands"| redis
+    robot([Robot-side worker]) -->|"LPOP policy:commands"| redis
+    robot -->|"RPUSH policy:events (JSON)"| redis
 ```
 
 ---
@@ -52,7 +53,7 @@ the chat settings, and ask the agent something like *"list the available
 policies and queue the walking one"*. Verify the queue:
 
 ```bash
-docker exec -it knot-redis redis-cli LRANGE policy_queue 0 -1
+docker exec -it knot-redis redis-cli LRANGE policy:commands 0 -1
 ```
 
 ---
@@ -140,7 +141,8 @@ else (`url`, `name`, `transport`, …) mirrors env.
 |---|---|---|
 | `POLICY_REGISTRY_PATH` | `/app/policies.yaml` | In-container path of the registry. |
 | `REDIS_URL` | `redis://redis:6379/0` | Connection URL to Redis. |
-| `REDIS_QUEUE_NAME` | `policy_queue` | The Redis list (FIFO) policy ids are pushed onto. |
+| `COMMAND_QUEUE_NAME` | `policy:commands` | Redis list (FIFO) policy ids are pushed onto. |
+| `EVENT_QUEUE_NAME` | `policy:events` | Redis list the robot publishes JSON status events on. |
 | `MCP_TRANSPORT` | `http` | `stdio` / `http` (streamable) / `sse`. |
 | `MCP_HOST`, `MCP_PORT` | `0.0.0.0`, `8000` | HTTP bind. |
 | `MCP_STATELESS_HTTP` | `true` | If `true`, no session-id handshake required. |
@@ -188,7 +190,7 @@ import redis
 
 r = redis.Redis.from_url("redis://localhost:6379/0", decode_responses=True)
 while True:
-    _, policy_id = r.blpop("policy_queue")
+    _, policy_id = r.blpop("policy:commands")
     run_policy(policy_id)   # your dispatch logic
 ```
 
@@ -201,7 +203,7 @@ while True:
 | Knot shows "MCP server closed the SSE stream before responding" | Old mcp-g1 build. Rebuild: `docker compose build mcp-g1 && docker compose up -d mcp-g1`. The current server defaults to `MCP_JSON_RESPONSE=true` which avoids this. |
 | `Missing session ID` | Stateful mode is on. Default is `MCP_STATELESS_HTTP=true`; check it is set on the mcp-g1 service. |
 | Bootstrap server doesn't appear in knot UI | Look for `[mcpBootstrap]` lines in `docker compose logs mcp-studio`. Most common cause is malformed `MCP_BOOTSTRAP_SERVERS` JSON. |
-| Queue stays empty after the agent says it pushed | `docker exec -it knot-redis redis-cli LRANGE policy_queue 0 -1`. If empty, check `docker compose logs mcp-g1` for tool-call errors. |
+| Queue stays empty after the agent says it pushed | `docker exec -it knot-redis redis-cli LRANGE policy:commands 0 -1`. If empty, check `docker compose logs mcp-g1` for tool-call errors. |
 | Knot can't reach Ollama | Confirm the `ollama` service is healthy: `docker compose ps`. `OLLAMA_HOST=http://ollama:11434` must use the service name, not `localhost`. |
 
 ---

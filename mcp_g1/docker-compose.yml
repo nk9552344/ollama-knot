@@ -11,12 +11,10 @@ services:
     environment:
       POLICY_REGISTRY_PATH: /app/policies.yaml
       REDIS_URL: redis://redis:6379/0
-      # Command queue: SELECT:<id> / [POLICY_SWITCH],N / [POLICY_MIMIC] tokens
-      REDIS_QUEUE_NAME: policy:command
-      # Events queue: read-only monitoring of `{"ts":..., "event":...}` payloads
-      REDIS_EVENTS_QUEUE_NAME: policy:events
-      # Value baked into the `[POLICY_SWITCH],<N>` command token
-      POLICY_MIMIC_INDEX: "6"
+      # Command queue: MCP RPUSHes plain policy IDs here, robot LPOPs them.
+      COMMAND_QUEUE_NAME: policy:commands
+      # Event queue: robot publishes structured JSON status events here.
+      EVENT_QUEUE_NAME: policy:events
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8000

@@ -164,8 +164,14 @@ class TwistRedisCtrlCfg(CtrlCfg):
 
 
 class McpRedisCtrlCfg(CtrlCfg):
-    """Controller that receives high-level commands from an MCP server via Redis
-    and publishes pipeline events back so the server can sync on motion completion."""
+    """Controller that consumes policy IDs from an MCP server via Redis and
+    publishes structured execution events back.
+
+    Protocol (kept deliberately narrow — see McpRedisCtrl docstring):
+        command_queue : MCP RPUSHes plain policy IDs (one per execution).
+        event_queue   : controller RPUSHes JSON events
+            {"timestamp": float, "type": str, "policy_id": str, "message": str}.
+    """
 
     ctrl_type: str = "McpRedisCtrl"
 
@@ -173,24 +179,22 @@ class McpRedisCtrlCfg(CtrlCfg):
     redis_port: int = 6379
     redis_db: int = 0
 
-    cmd_key: str = "policy:command"
-    """Redis LIST. MCP server RPUSHes command strings here (e.g. '[POLICY_MIMIC]',
-    '[POLICY_SWITCH],2'). Controller LPOPs them on every tick.
-    Default matches the docker `mcp-g1` server's `REDIS_QUEUE_NAME=policy:command`."""
+    command_queue: str = "policy:commands"
+    """Redis LIST holding inbound policy IDs (FIFO; LPOP-ed one at a time)."""
 
-    event_key: str = "policy:events"
-    """Redis LIST. Controller RPUSHes pipeline transitions here so the MCP server can
-    LRANGE/BLPOP them. Events: 'READY', 'MIMIC_STARTED:<name>', 'MIMIC_DONE:<name>',
-    'LOCO_ACTIVE', 'LOCO_READY', 'SHUTDOWN'.
-    Default matches the docker `mcp-g1` server's `REDIS_EVENTS_QUEUE_NAME=policy:events`."""
+    event_queue: str = "policy:events"
+    """Redis LIST that receives JSON status events. Schema:
+    {"timestamp": <float>, "type": <str>, "policy_id": <str>, "message": <str>}.
+    Event types: ready, policy_started, policy_completed, policy_failed,
+    shutdown, motion_reset."""
 
     publish_events: bool = True
     event_history_max: int = 200
     """LTRIM events list to this length so it doesn't grow unbounded."""
 
     loco_transition_hold_steps: int = 80
-    """After observing [POLICY_LOCO], hold any queued [POLICY_MIMIC] for this many
-    pipeline ticks so the mimic→loco interpolation (DURATIONS_MIMIC_LOCO = [0,75,0]
-    = 75 ticks) finishes before the next mimic starts. If the next [POLICY_MIMIC]
-    fires while the interpolation is still in progress, the pipeline silently drops
-    it ('Already in mimic policy') and the next motion never plays."""
+    """After the pipeline auto-transitions back to loco ([POLICY_LOCO]), hold the
+    next queued policy for this many ticks so the mimic→loco interpolation
+    (DURATIONS_MIMIC_LOCO = [0,75,0] = 75 ticks) finishes before the next
+    switch_to_mimic() runs. Otherwise the pipeline silently drops the switch
+    ('Already in mimic policy') and the next motion never plays."""

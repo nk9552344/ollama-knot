@@ -203,9 +203,9 @@ class RlLocoMimicPipeline(RlMultiPolicyPipeline):
         self.env.update_dof_cfg(override_cfg=self.policy.cfg_action_dof)
         self.visualizer = self.env.visualizer
 
-        # Tell any registered McpRedisCtrl what mimic policies are loaded so it
-        # can rewrite '[POLICY_SWITCH],N' after a 'SELECT:<name>' from external
-        # producers (e.g. the docker MCP server with its hardcoded N).
+        # Tell any registered McpRedisCtrl which mimic policies are loaded so
+        # it can resolve policy IDs (= policy filenames) into the internal
+        # mimic index used by the pipeline's command bus.
         mimic_names = [p.policy_name for p in self.cfg.mimic_policies]
         for entry in self.ctrl_manager.controllers.values():
             if hasattr(entry.inst, "set_mimic_names"):

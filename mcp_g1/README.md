@@ -8,11 +8,29 @@ The server exposes three tools:
 | Tool | Purpose |
 |---|---|
 | `list_policies()` | Returns every policy from the registry (`id`, `name`, `description`). |
-| `push_policy(policy_id)` | Pushes a single policy id onto a Redis list. |
-| `push_policy_sequence(policy_ids)` | Pushes an ordered batch of policy ids onto the same Redis list. |
+| `execute_policy(policy_id)` | Queues a policy ID for execution by pushing it onto the command Redis list. |
+| `wait_for_event(timeout_s)` | Blocks until the robot publishes a new JSON event on the event queue. |
 
-Policies are pushed with `RPUSH`, so a downstream worker consuming with
-`LPOP`/`BLPOP` will receive them in FIFO order.
+Policies are pushed with `RPUSH`, so the robot consuming with `LPOP` receives
+them in FIFO order. Each call to `execute_policy` enqueues a single policy ID —
+nothing else. The robot owns all scheduling, policy switching, and locomotion
+transitions internally.
+
+### Event schema
+
+Events on the event queue use a single JSON schema:
+
+```json
+{
+    "timestamp": 1782397863.12,
+    "type": "policy_started",
+    "policy_id": "wave",
+    "message": ""
+}
+```
+
+Event types: `ready`, `policy_started`, `policy_completed`, `policy_failed`,
+`shutdown`, `motion_reset`.
 
 ---
 
@@ -40,7 +58,9 @@ policies:
     description: <free text>
 ```
 
-See [policies.yaml](policies.yaml) for a working example.
+The `id` must match the corresponding policy filename on the robot (e.g. `wave`
+maps to `wave.pt` / `wave.onnx`). See [policies.yaml](policies.yaml) for a
+working example.
 
 The registry is **re-read on every tool call**, so you can edit the file
 on a running container (via the mounted volume) and the changes are picked
@@ -61,7 +81,8 @@ cp .env.example .env
 |---|---|---|
 | `POLICY_REGISTRY_PATH` | `policies.yaml` | Path to the registry file. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL. |
-| `REDIS_QUEUE_NAME` | `policy_queue` | Redis list used as the queue. |
+| `COMMAND_QUEUE_NAME` | `policy:commands` | Redis list the MCP RPUSHes policy IDs onto. |
+| `EVENT_QUEUE_NAME` | `policy:events` | Redis list the robot publishes JSON status events on. |
 | `MCP_TRANSPORT` | `stdio` | `stdio` for local subprocess; `http` for streamable-HTTP (use this in Docker). |
 | `MCP_HOST` | `0.0.0.0` | HTTP bind host. |
 | `MCP_PORT` | `8000` | HTTP bind port. |
@@ -114,23 +135,29 @@ MCP_TRANSPORT=http python server.py
 
 ---
 
-## Verify the queue
+## Verify the queues
 
-After the agent calls `push_policy` / `push_policy_sequence`, you can
-inspect the queue with `redis-cli`:
+After the agent calls `execute_policy`, you can inspect the queue with
+`redis-cli`:
 
 ```bash
-redis-cli LRANGE policy_queue 0 -1
+redis-cli LRANGE policy:commands 0 -1
 ```
 
-A worker on the robot side consumes policies like this (Python):
+A worker on the robot side consumes policy IDs like this (Python):
 
 ```python
 import redis
 r = redis.Redis.from_url("redis://localhost:6379/0", decode_responses=True)
 while True:
-    _, policy_id = r.blpop("policy_queue")
+    _, policy_id = r.blpop("policy:commands")
     run_policy(policy_id)  # your dispatch logic
+```
+
+To watch the event stream:
+
+```bash
+redis-cli LRANGE policy:events -10 -1
 ```
 
 ---

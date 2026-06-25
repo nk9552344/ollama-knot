@@ -15,15 +15,38 @@ logger = logging.getLogger(__name__)
 
 @ctrl_registry.register
 class McpRedisCtrl(Controller):
-    """Bridge between an external MCP server (or any other client) and the RoboJuDo
-    pipeline command bus over Redis.
+    """Bridge between an external MCP server (or any other Redis producer) and
+    the RoboJuDo pipeline.
 
-    Inbound:  LPOP <cmd_key>   → injects strings into ctrl_data["COMMANDS"].
-    Outbound: RPUSH <event_key> with transition events the server can BLPOP on.
+    Protocol
+    --------
+    Inbound (command_queue, Redis LIST):
+        Plain policy IDs (strings). One queued ID == one policy execution.
 
-    The pipeline is *always* running a policy (loco by default, mimic when the
-    server pushes [POLICY_MIMIC]), so there is never any dead time between
-    motions — perfect for sim2real safety.
+            RPUSH policy:commands wave
+            RPUSH policy:commands sit_down
+
+    Outbound (event_queue, Redis LIST):
+        Structured JSON events with a single schema:
+
+            {"timestamp": <float>, "type": <str>, "policy_id": <str>, "message": <str>}
+
+        Event types: ready, policy_started, policy_completed, policy_failed,
+                     shutdown, motion_reset.
+
+    The pipeline's internal command bus ([POLICY_SWITCH]/[POLICY_MIMIC]/[POLICY_LOCO])
+    is driven locally by this controller and never leaves the robot.
+
+    Scheduling guarantees
+    ---------------------
+    * Locomotion is the default idle state — when the queue is empty the robot
+      stays in loco.
+    * Each queued policy is executed exactly once and to completion before the
+      next is popped (FIFO).
+    * Every policy transition passes through locomotion: the pipeline's
+      [MOTION_DONE]→[POLICY_LOCO] auto-handoff fires after each mimic, and a
+      configurable hold lets the mimic→loco interpolation settle before the
+      next switch_to_mimic() runs.
     """
 
     cfg_ctrl: McpRedisCtrlCfg
@@ -31,13 +54,16 @@ class McpRedisCtrl(Controller):
     def __init__(self, cfg_ctrl: McpRedisCtrlCfg, env=None, device="cpu"):
         super().__init__(cfg_ctrl=cfg_ctrl, env=env, device=device)
 
-        self.cmd_key = cfg_ctrl.cmd_key
-        self.event_key = cfg_ctrl.event_key
+        self.command_queue = cfg_ctrl.command_queue
+        self.event_queue = cfg_ctrl.event_queue
         self.publish_events = cfg_ctrl.publish_events
         self.event_history_max = cfg_ctrl.event_history_max
         self.loco_transition_hold_steps = cfg_ctrl.loco_transition_hold_steps
 
-        self.cmd_buffer: deque[str] = deque(maxlen=256)
+        # Inbound queue of raw policy IDs LPOP-ed from Redis. process_triggers
+        # consumes one at a time and translates each into the internal command
+        # sequence required to switch + start the matching mimic policy.
+        self._inbound: deque[str] = deque(maxlen=256)
         self._stop = False
 
         self._redis_client: redis.Redis | None = None
@@ -46,146 +72,178 @@ class McpRedisCtrl(Controller):
         self._inbound_thread = Thread(target=self._inbound_worker, daemon=True)
         self._inbound_thread.start()
 
-        # Track previous policy state so we can emit edge-triggered events.
-        self._prev_in_mimic = False
-        self._current_mimic_name: str | None = None
+        # Policy-ID → internal mimic index, populated by the pipeline after
+        # construction (see RlLocoMimicPipeline.__init__). Policy IDs match
+        # the policy filenames so the MCP server never needs to know indices.
+        self._policy_id_to_idx: dict[str, int] = {}
 
-        # Name→index map for mimic policies, populated by the pipeline after
-        # construction. Lets us rewrite '[POLICY_SWITCH],N' tokens that follow
-        # 'SELECT:<name>' so external producers (e.g. a separate MCP server)
-        # don't need to know the pipeline's mimic-policy ordering.
-        self._mimic_name_to_idx: dict[str, int] = {}
-        self._pending_idx_override: int | None = None
+        # ── Execution state machine ──────────────────────────────────────
+        self._policy_in_flight: str | None = None
+        """Policy ID we've dispatched and are waiting on. None means we're
+        idle in loco and may pop the next queued ID."""
 
-        # Loco-interpolation gate. While > 0 we refuse to forward [POLICY_MIMIC]
-        # so the previous mimic→loco transition can complete.
+        self._pending_switch: tuple[str, int] | None = None
+        """(policy_id, mimic_idx) primed by process_triggers to emit
+        '[POLICY_SWITCH],N' on the next tick."""
+
+        self._pending_kick: bool = False
+        """True between emitting '[POLICY_SWITCH],N' and emitting '[POLICY_MIMIC]'.
+        The two tokens must arrive on separate ticks because CtrlManager merges
+        commands across controllers through a set, which loses ordering — so
+        the pipeline must see SWITCH (which only updates policy_mimic_idx)
+        before MIMIC (which triggers switch_to_mimic() using that idx)."""
+
         self._loco_hold_remaining = 0
+        """Ticks remaining before the next queued policy may be dispatched.
+        Set when [POLICY_LOCO] is observed so the mimic→loco interpolation in
+        PolicyInterpManager can finish before the next switch_to_mimic() runs;
+        otherwise the pipeline silently rejects the switch."""
 
-        self._publish_event("READY")
+        self._publish_event("ready")
         logger.info(
-            f"[McpRedisCtrl] Initialized. cmd_key={self.cmd_key!r} event_key={self.event_key!r}"
+            "[McpRedisCtrl] Initialized. command_queue=%r event_queue=%r",
+            self.command_queue,
+            self.event_queue,
         )
 
     # ───────────── Controller protocol ─────────────
 
     def set_mimic_names(self, names: list[str]) -> None:
-        """Populate the name→index map used to rewrite '[POLICY_SWITCH],N' after
-        a 'SELECT:<name>' side-channel command. Idempotent; call again to refresh."""
-        self._mimic_name_to_idx = {name: idx for idx, name in enumerate(names)}
-        logger.info(f"[McpRedisCtrl] Registered {len(names)} mimic names: {list(self._mimic_name_to_idx)}")
+        """Register the policy IDs the pipeline knows about.
+
+        Policy IDs in the MCP protocol are the mimic-policy filenames; the
+        pipeline assigns each one an internal index. We use that index to
+        translate a queued ID into the '[POLICY_SWITCH],N' token the pipeline
+        expects, so the MCP server never has to know about indices.
+
+        Idempotent — safe to call again to refresh after reconfiguration."""
+        self._policy_id_to_idx = {name: idx for idx, name in enumerate(names)}
+        logger.info(
+            "[McpRedisCtrl] Registered %d policy IDs: %s",
+            len(self._policy_id_to_idx),
+            list(self._policy_id_to_idx),
+        )
 
     def reset(self):
-        self.cmd_buffer.clear()
-        self._prev_in_mimic = False
-        self._current_mimic_name = None
-        self._pending_idx_override = None
+        self._inbound.clear()
+        self._policy_in_flight = None
+        self._pending_switch = None
+        self._pending_kick = False
         self._loco_hold_remaining = 0
-        self._publish_event("RESET")
+        self._publish_event("ready")
 
     def get_data(self):
-        return {"mcp_pending": len(self.cmd_buffer)}
+        return {
+            "mcp_pending": len(self._inbound),
+            "mcp_in_flight": self._policy_in_flight or "",
+        }
 
     def process_triggers(self, ctrl_data):
-        # Emit at most ONE real command per tick. The CtrlManager merges commands
-        # from all controllers through a set, which loses ordering — so
-        # sequencing-sensitive pairs like ([POLICY_SWITCH],N + [POLICY_MIMIC])
-        # must hit separate ticks. At 50 Hz this adds at most ~20 ms latency.
-        # SELECT:<name> is metadata, not a real command — we consume any leading
-        # SELECTs inline in the same tick so they stay glued to the POLICY_SWITCH
-        # that follows them (otherwise a batched RPUSH of two motions would let
-        # the second SELECT overwrite the first before its POLICY_SWITCH ran).
         commands: list[str] = []
-        while self.cmd_buffer:
-            head = self.cmd_buffer[0]
 
-            if head.startswith("SELECT:"):
-                self.cmd_buffer.popleft()
-                self._apply_select(head[len("SELECT:") :])
-                continue
+        # Stage 2: emit '[POLICY_MIMIC]' one tick after '[POLICY_SWITCH],N'.
+        if self._pending_kick:
+            self._pending_kick = False
+            commands.append("[POLICY_MIMIC]")
+            return ctrl_data, commands
 
-            # Hold [POLICY_MIMIC] until the pipeline is back in loco AND the
-            # mimic→loco interpolation has finished. Otherwise switch_to_mimic()
-            # is silently rejected ('Already in mimic policy') and the next
-            # motion is dropped. Crucially this also blocks a pre-queued mimic
-            # while a previous mimic is still playing (batched RPUSH from the
-            # docker MCP server's push_policy_sequence).
-            if head == "[POLICY_MIMIC]" and (
-                self._prev_in_mimic or self._loco_hold_remaining > 0
-            ):
+        # Stage 1: emit '[POLICY_SWITCH],N' for the primed policy.
+        if self._pending_switch is not None:
+            policy_id, idx = self._pending_switch
+            self._pending_switch = None
+            self._policy_in_flight = policy_id
+            self._pending_kick = True
+            commands.append(f"[POLICY_SWITCH],{idx}")
+            self._publish_event("policy_started", policy_id=policy_id)
+            logger.info(
+                "[McpRedisCtrl] Dispatching policy %r (idx=%d).", policy_id, idx
+            )
+            return ctrl_data, commands
+
+        # Idle: pop the next queued policy ID — but only once we're back in loco
+        # AND the mimic→loco interpolation hold has elapsed.
+        if (
+            self._policy_in_flight is None
+            and self._loco_hold_remaining == 0
+            and self._inbound
+        ):
+            policy_id = self._inbound.popleft()
+
+            # Defensive: reject any leftover internal-protocol tokens so a
+            # legacy producer can't bypass the new contract.
+            if policy_id.startswith("[") or policy_id.startswith("SELECT:"):
+                logger.warning(
+                    "[McpRedisCtrl] Ignoring internal-protocol token %r on "
+                    "command_queue %r — only policy IDs are accepted.",
+                    policy_id,
+                    self.command_queue,
+                )
+                self._publish_event(
+                    "policy_failed",
+                    policy_id=policy_id,
+                    message=(
+                        "Internal-protocol tokens must not appear on the "
+                        "command queue; push policy IDs only."
+                    ),
+                )
                 return ctrl_data, commands
 
-            cmd = self.cmd_buffer.popleft()
-            # If the most recent SELECT:<name> resolved to a known mimic index,
-            # rewrite the very next [POLICY_SWITCH],N so external producers
-            # (e.g. the docker MCP server's hardcoded POLICY_MIMIC_INDEX) don't
-            # need to know our local mimic ordering.
-            if cmd.startswith("[POLICY_SWITCH],") and self._pending_idx_override is not None:
-                original = cmd
-                cmd = f"[POLICY_SWITCH],{self._pending_idx_override}"
-                if original != cmd:
-                    logger.info(
-                        f"[McpRedisCtrl] Rewrote {original!r} → {cmd!r} for mimic "
-                        f"{self._current_mimic_name!r}"
-                    )
-                self._pending_idx_override = None
-            commands.append(cmd)
-            logger.info(f"[McpRedisCtrl] Emitting command: {cmd}")
-            break
-        return ctrl_data, commands
+            idx = self._policy_id_to_idx.get(policy_id)
+            if idx is None:
+                logger.warning(
+                    "[McpRedisCtrl] Unknown policy id %r. Known: %s",
+                    policy_id,
+                    list(self._policy_id_to_idx),
+                )
+                self._publish_event(
+                    "policy_failed",
+                    policy_id=policy_id,
+                    message=(
+                        f"Unknown policy id {policy_id!r}. "
+                        f"Known: {list(self._policy_id_to_idx)}"
+                    ),
+                )
+            else:
+                self._pending_switch = (policy_id, idx)
 
-    def _apply_select(self, name: str) -> None:
-        """Side-channel SELECT:<name> handler. Sets the event label and primes a
-        one-shot index override for the next [POLICY_SWITCH],N."""
-        self._current_mimic_name = name
-        idx = self._mimic_name_to_idx.get(name)
-        if idx is not None:
-            self._pending_idx_override = idx
-        elif self._mimic_name_to_idx:
-            logger.warning(
-                f"[McpRedisCtrl] SELECT:{name!r} — unknown mimic name. "
-                f"Known: {list(self._mimic_name_to_idx)}. "
-                "Falling back to whatever [POLICY_SWITCH],N follows."
-            )
+        return ctrl_data, commands
 
     def post_step_callback(self, commands: list[str] | None = None):
         """Observe the final command list (including pipeline-appended ones such
         as the [POLICY_LOCO] auto-inserted on [MOTION_DONE]) and publish events.
         Also drives the loco-interpolation hold-down timer."""
-        # Tick down the loco hold and publish LOCO_READY on the edge.
         if self._loco_hold_remaining > 0:
             self._loco_hold_remaining -= 1
-            if self._loco_hold_remaining == 0:
-                self._publish_event("LOCO_READY")
 
-        if not self.publish_events:
-            return
         for cmd in commands or []:
             if cmd == "[POLICY_LOCO]":
-                if self._prev_in_mimic:
-                    name = self._current_mimic_name or "?"
-                    self._publish_event(f"MIMIC_DONE:{name}")
-                    self._current_mimic_name = None
-                self._prev_in_mimic = False
-                self._publish_event("LOCO_ACTIVE")
-                # Start (or restart) the hold so the next mimic waits for the
-                # mimic→loco interpolation in PolicyInterpManager to finish.
+                # The pipeline auto-emits [POLICY_LOCO] when the current mimic
+                # finishes (via [MOTION_DONE]). It also fires on manual loco
+                # overrides (e.g. a keyboard '['). Either way, whatever was in
+                # flight is no longer running.
+                if self._policy_in_flight is not None:
+                    completed = self._policy_in_flight
+                    self._policy_in_flight = None
+                    self._publish_event("policy_completed", policy_id=completed)
+                # Start (or restart) the hold so the next queued policy waits
+                # for the mimic→loco interpolation in PolicyInterpManager to
+                # finish.
                 self._loco_hold_remaining = self.loco_transition_hold_steps
-            elif cmd == "[POLICY_MIMIC]":
-                self._prev_in_mimic = True
-                # name is set by the server right before pushing POLICY_MIMIC
-                self._publish_event(f"MIMIC_STARTED:{self._current_mimic_name or '?'}")
-            elif cmd.startswith("[POLICY_SWITCH]"):
-                # Tracked via the SELECT:<name> side-channel below.
-                pass
             elif cmd == "[SHUTDOWN]":
-                self._publish_event("SHUTDOWN")
+                self._publish_event(
+                    "shutdown",
+                    policy_id=self._policy_in_flight or "",
+                )
             elif cmd == "[MOTION_RESET]":
-                self._publish_event("MOTION_RESET")
+                self._publish_event(
+                    "motion_reset",
+                    policy_id=self._policy_in_flight or "",
+                )
 
     # ───────────── Internals ─────────────
 
     def _inbound_worker(self):
-        """Poll the Redis list for command strings; never block the main thread."""
+        """Poll the Redis list for policy IDs; never block the main thread."""
         backoff = 0.005
         while not self._stop:
             client = self._redis_client
@@ -194,11 +252,11 @@ class McpRedisCtrl(Controller):
                 if client is None:
                     return
             try:
-                # LPOP returns None when empty; use a short sleep instead of BLPOP
-                # to keep the worker responsive to _stop without an extra thread.
-                item = client.lpop(self.cmd_key)
+                # LPOP returns None when empty; a short sleep keeps the worker
+                # responsive to _stop without an extra signaling thread.
+                item = client.lpop(self.command_queue)
             except RedisError as e:
-                logger.warning(f"[McpRedisCtrl] Redis lost ({e}); reconnecting")
+                logger.warning("[McpRedisCtrl] Redis lost (%s); reconnecting", e)
                 self._redis_client = None
                 time.sleep(0.5)
                 continue
@@ -206,17 +264,17 @@ class McpRedisCtrl(Controller):
                 time.sleep(backoff)
                 continue
             try:
-                text = item.decode() if isinstance(item, (bytes, bytearray)) else str(item)
+                text = (
+                    item.decode()
+                    if isinstance(item, (bytes, bytearray))
+                    else str(item)
+                ).strip()
             except Exception:
-                logger.warning(f"[McpRedisCtrl] Could not decode item: {item!r}")
+                logger.warning("[McpRedisCtrl] Could not decode item: %r", item)
                 continue
-
-            # SELECT:<name> is metadata that must stay in order with its
-            # POLICY_SWITCH/POLICY_MIMIC. Push it onto cmd_buffer like any
-            # other token; process_triggers consumes it inline in the right
-            # tick. (Consuming SELECTs eagerly here used to let a batched RPUSH
-            # of multiple motions overwrite each other's index override.)
-            self.cmd_buffer.append(text)
+            if not text:
+                continue
+            self._inbound.append(text)
 
     def _connect_redis_blocking(self) -> redis.Redis | None:
         delay = 0.5
@@ -231,42 +289,65 @@ class McpRedisCtrl(Controller):
                 )
                 client.ping()
                 logger.info(
-                    f"[McpRedisCtrl] Redis connected ({self.cfg_ctrl.redis_host}:{self.cfg_ctrl.redis_port})"
+                    "[McpRedisCtrl] Redis connected (%s:%s)",
+                    self.cfg_ctrl.redis_host,
+                    self.cfg_ctrl.redis_port,
                 )
                 self._redis_client = client
                 return client
             except Exception as e:
-                logger.error(f"[McpRedisCtrl] Redis connect failed: {e}; retrying in {delay}s")
+                logger.error(
+                    "[McpRedisCtrl] Redis connect failed: %s; retrying in %ss",
+                    e,
+                    delay,
+                )
                 time.sleep(delay)
                 delay = min(delay * 2, 5.0)
         return None
 
-    def _publish_event(self, payload: str):
+    def _publish_event(
+        self,
+        event_type: str,
+        *,
+        policy_id: str = "",
+        message: str = "",
+    ) -> None:
         if not self.publish_events:
             return
         client = self._redis_client
         if client is None:
             return
+        payload = {
+            "timestamp": time.time(),
+            "type": event_type,
+            "policy_id": policy_id,
+            "message": message,
+        }
         try:
-            event = json.dumps({"ts": time.time(), "event": payload})
             pipe = client.pipeline()
-            pipe.rpush(self.event_key, event)
+            pipe.rpush(self.event_queue, json.dumps(payload))
             if self.event_history_max > 0:
-                pipe.ltrim(self.event_key, -self.event_history_max, -1)
+                pipe.ltrim(self.event_queue, -self.event_history_max, -1)
             pipe.execute()
         except RedisError as e:
-            logger.warning(f"[McpRedisCtrl] Could not publish event {payload!r}: {e}")
+            logger.warning(
+                "[McpRedisCtrl] Could not publish event %r: %s", event_type, e
+            )
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     ctrl = McpRedisCtrl(cfg_ctrl=McpRedisCtrlCfg(), env=None)
-    print("Listening on", ctrl.cmd_key, "— push commands with:")
-    print(f"  redis-cli RPUSH {ctrl.cmd_key} '[POLICY_MIMIC]'")
+    print(
+        "Listening on",
+        ctrl.command_queue,
+        "— push a policy ID with:",
+    )
+    print(f"  redis-cli RPUSH {ctrl.command_queue} 'wave'")
     while True:
         data = ctrl.get_data()
         _, cmds = ctrl.process_triggers(data)
         if cmds:
-            print("Received:", cmds)
+            print("Emitting:", cmds)
             ctrl.post_step_callback(cmds)
         time.sleep(0.05)
