@@ -208,7 +208,12 @@ services:
       # ==============================================================
       # REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
 
-      REDIS_QUEUE_NAME: policy_queue
+      # Command queue: SELECT:<id> / [POLICY_SWITCH],N / [POLICY_MIMIC] tokens
+      REDIS_QUEUE_NAME: policy:command
+      # Events queue: read-only monitoring of `{"ts":..., "event":...}` payloads
+      REDIS_EVENTS_QUEUE_NAME: policy:events
+      # Value baked into the `[POLICY_SWITCH],<N>` command token
+      POLICY_MIMIC_INDEX: "6"
 
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
