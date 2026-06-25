@@ -13,7 +13,31 @@
 #   neerajkumar1044/infosys-ollama-knot:latest
 #   neerajkumar1044/infosys-mcp-g1:latest
 #
-# Redis Modes:
+# ──────────────────────────────────────────────────────────────────────────────
+# OLLAMA MODES
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# MODE 1 — Docker Ollama (default)
+#   Ollama runs as a container managed by this Compose file.
+#   No local installation required.
+#   • Keep the `ollama` service block below as-is (un-commented).
+#   • Keep OLLAMA_HOST: http://ollama:11434 in mcp-studio.
+#   • Keep `ollama: condition: service_started` in mcp-studio depends_on.
+#
+# MODE 2 — Locally installed Ollama
+#   Ollama is already running on your host machine (e.g. via `ollama serve`).
+#   • Comment out the entire `ollama` service block below.
+#   • In mcp-studio environment, comment out:
+#       OLLAMA_HOST: http://ollama:11434
+#     and uncomment ONE of the alternatives:
+#       macOS / Windows → OLLAMA_HOST: http://host.docker.internal:11434
+#       Linux           → OLLAMA_HOST: http://172.17.0.1:11434
+#         (or use the extra_hosts approach; see Linux note below)
+#   • In mcp-studio depends_on, comment out the `ollama` block.
+#
+# ──────────────────────────────────────────────────────────────────────────────
+# REDIS MODES
+# ──────────────────────────────────────────────────────────────────────────────
 #
 # 1. Default (Docker Redis)
 #    - Leave REDIS_URL as redis://redis:6379/0
@@ -51,7 +75,7 @@ services:
     # -------------------------------------------------------------------------
     # DOCKER HUB IMAGE (recommended for deployment)
     # -------------------------------------------------------------------------
-    image: neerajkumar1044/infosys-ollama-knot:latest
+    image: neerajkumar1044/infosys-ollama-knot
 
     container_name: knot
     restart: unless-stopped
@@ -61,7 +85,17 @@ services:
 
     environment:
       # ── Ollama wiring ────────────────────────────────────────────────
+      # MODE 1 (default): Ollama running as a Docker container
       OLLAMA_HOST: http://ollama:11434
+
+      # MODE 2: Ollama installed and running locally on the host machine
+      # macOS / Windows — Docker Desktop provides this magic hostname:
+      # OLLAMA_HOST: http://host.docker.internal:11434
+      #
+      # Linux — use the Docker bridge gateway IP instead:
+      # OLLAMA_HOST: http://172.17.0.1:11434
+      # (alternatively, uncomment extra_hosts below and keep host.docker.internal)
+
       DATA_DIR: /app/data
       NEXT_TELEMETRY_DISABLED: "1"
 
@@ -76,15 +110,32 @@ services:
       - ./knot/data:/app/data
 
     depends_on:
+      # MODE 1 (default): wait for the Ollama container to start
       ollama:
         condition: service_started
+
+      # MODE 2: comment out the block above when using a local Ollama install
 
       mcp-g1:
         condition: service_started
 
+    # -------------------------------------------------------------------------
+    # Linux only (MODE 2 local Ollama):
+    # Lets containers resolve "host.docker.internal" to the host's bridge IP.
+    # Uncomment if using OLLAMA_HOST: http://host.docker.internal:11434 on Linux.
+    # -------------------------------------------------------------------------
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
     networks:
       - knot
 
+  # ---------------------------------------------------------------------------
+  # OLLAMA SERVICE
+  #
+  # MODE 1 (default): keep this entire block active.
+  # MODE 2 (local Ollama): comment out this entire block.
+  # ---------------------------------------------------------------------------
   ollama:
     image: ollama/ollama:latest
 
@@ -122,7 +173,7 @@ services:
     # -------------------------------------------------------------------------
     # DOCKER HUB IMAGE (recommended for deployment)
     # -------------------------------------------------------------------------
-    image: neerajkumar1044/infosys-mcp-g1:latest
+    image: neerajkumar1044/infosys-mcp-g1
 
     container_name: mcp-g1
     restart: unless-stopped
