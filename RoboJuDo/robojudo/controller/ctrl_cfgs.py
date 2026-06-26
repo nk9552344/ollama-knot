@@ -174,22 +174,34 @@ class McpRedisCtrlCfg(CtrlCfg):
                         one ID; ``execute_policies`` pushes a batch atomically.
         event_queue   : controller RPUSHes JSON events
             {"timestamp": float, "type": str, "policy_id": str, "message": str}.
+
+    Connection precedence (matches ``mcp_g1/server.py`` exactly):
+        1. ``redis_url`` field if set (e.g. ``redis://localhost:6379/0``).
+        2. ``$REDIS_URL`` environment variable if set.
+        3. ``redis_host`` / ``redis_port`` / ``redis_db`` fields (legacy).
     """
 
     ctrl_type: str = "McpRedisCtrl"
+
+    redis_url: str | None = None
+    """Full Redis URL (preferred). Matches the ``REDIS_URL`` env var used by
+    ``mcp_g1/server.py``. If ``None``, falls back to ``$REDIS_URL`` env var,
+    then to the host/port/db fields below."""
 
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
 
     command_queue: str = "policy:commands"
-    """Redis LIST holding inbound policy IDs (FIFO; LPOP-ed one at a time)."""
+    """Redis LIST holding inbound policy IDs (FIFO; BLPOP-ed one at a time).
+    Must match ``COMMAND_QUEUE_NAME`` in ``mcp_g1/server.py``."""
 
     event_queue: str = "policy:events"
     """Redis LIST that receives JSON status events. Schema:
     {"timestamp": <float>, "type": <str>, "policy_id": <str>, "message": <str>}.
     Event types: ready, policy_started, policy_completed, policy_failed,
-    shutdown, motion_reset."""
+    shutdown, motion_reset. Must match ``EVENT_QUEUE_NAME`` in
+    ``mcp_g1/server.py``."""
 
     publish_events: bool = True
     event_history_max: int = 200
