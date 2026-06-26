@@ -167,8 +167,11 @@ class McpRedisCtrlCfg(CtrlCfg):
     """Controller that consumes policy IDs from an MCP server via Redis and
     publishes structured execution events back.
 
-    Protocol (kept deliberately narrow — see McpRedisCtrl docstring):
-        command_queue : MCP RPUSHes plain policy IDs (one per execution).
+    Protocol (kept deliberately narrow — see McpRedisCtrl docstring and
+    ``mcp_g1/server.py`` for the authoritative producer):
+        command_queue : MCP RPUSHes plain policy IDs (matching IDs from
+                        ``mcp_g1/policies.yaml``). ``execute_policy`` pushes
+                        one ID; ``execute_policies`` pushes a batch atomically.
         event_queue   : controller RPUSHes JSON events
             {"timestamp": float, "type": str, "policy_id": str, "message": str}.
     """

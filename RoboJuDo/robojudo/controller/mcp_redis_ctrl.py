@@ -15,38 +15,56 @@ logger = logging.getLogger(__name__)
 
 @ctrl_registry.register
 class McpRedisCtrl(Controller):
-    """Bridge between an external MCP server (or any other Redis producer) and
-    the RoboJuDo pipeline.
+    """Bridge between the MCP server (``mcp_g1/server.py``) and the RoboJuDo
+    pipeline, communicating exclusively over two Redis lists.
 
-    Protocol
-    --------
-    Inbound (command_queue, Redis LIST):
-        Plain policy IDs (strings). One queued ID == one policy execution.
+    Contract (must stay in lockstep with ``mcp_g1/server.py``)
+    ---------------------------------------------------------
+    Inbound — ``command_queue`` (default ``policy:commands``), Redis LIST:
+        The MCP server ``RPUSH``-es **plain policy IDs** (one per execution).
+        Each ID is a string matching an ``id`` in ``mcp_g1/policies.yaml``,
+        which is itself the mimic-policy filename loaded by the pipeline
+        (e.g. ``video_017``, ``video_033``). This controller ``LPOP``-s them
+        in FIFO order. **No internal protocol tokens** (``[...]``, ``SELECT:``)
+        ever appear on this queue — the MCP server validates IDs against the
+        registry before pushing, and ``execute_policies`` enqueues batches
+        atomically via a single multi-arg ``RPUSH``.
 
-            RPUSH policy:commands wave
-            RPUSH policy:commands sit_down
+            # MCP side (mcp_g1/server.py)
+            redis_client.rpush("policy:commands", "video_017")
+            redis_client.rpush("policy:commands", "video_033", "video_017")
 
-    Outbound (event_queue, Redis LIST):
-        Structured JSON events with a single schema:
+    Outbound — ``event_queue`` (default ``policy:events``), Redis LIST:
+        Structured JSON events with a single schema (consumed by the MCP
+        server's ``wait_for_event`` tool):
 
             {"timestamp": <float>, "type": <str>, "policy_id": <str>, "message": <str>}
 
-        Event types: ready, policy_started, policy_completed, policy_failed,
-                     shutdown, motion_reset.
+        Event types: ``ready``, ``policy_started``, ``policy_completed``,
+        ``policy_failed``, ``shutdown``, ``motion_reset``.
 
-    The pipeline's internal command bus ([POLICY_SWITCH]/[POLICY_MIMIC]/[POLICY_LOCO])
-    is driven locally by this controller and never leaves the robot.
+    The pipeline's internal command bus (``[POLICY_SWITCH]``/``[POLICY_MIMIC]``/
+    ``[POLICY_LOCO]``) is driven locally by this controller in response to the
+    popped IDs and never crosses the Redis boundary.
 
     Scheduling guarantees
     ---------------------
+    The MCP server only ever pushes **active (mimic) policy IDs** — the loco
+    policy is the local default and is never enqueued. This controller weaves
+    loco between every queued policy:
+
+        [loco (default)] → [policy_a] → [loco (transition)]
+                          → [policy_b] → [loco (transition)]
+                          → ... → [loco (idle, queue empty)]
+
     * Locomotion is the default idle state — when the queue is empty the robot
       stays in loco.
-    * Each queued policy is executed exactly once and to completion before the
-      next is popped (FIFO).
+    * Each queued policy runs exactly once and to completion before the next
+      is popped (FIFO).
     * Every policy transition passes through locomotion: the pipeline's
-      [MOTION_DONE]→[POLICY_LOCO] auto-handoff fires after each mimic, and a
-      configurable hold lets the mimic→loco interpolation settle before the
-      next switch_to_mimic() runs.
+      ``[MOTION_DONE]`` → ``[POLICY_LOCO]`` auto-handoff fires when each mimic
+      finishes, and ``loco_transition_hold_steps`` lets the mimic→loco
+      interpolation settle before the next ``switch_to_mimic()`` runs.
     """
 
     cfg_ctrl: McpRedisCtrlCfg
@@ -168,25 +186,6 @@ class McpRedisCtrl(Controller):
             and self._inbound
         ):
             policy_id = self._inbound.popleft()
-
-            # Defensive: reject any leftover internal-protocol tokens so a
-            # legacy producer can't bypass the new contract.
-            if policy_id.startswith("[") or policy_id.startswith("SELECT:"):
-                logger.warning(
-                    "[McpRedisCtrl] Ignoring internal-protocol token %r on "
-                    "command_queue %r — only policy IDs are accepted.",
-                    policy_id,
-                    self.command_queue,
-                )
-                self._publish_event(
-                    "policy_failed",
-                    policy_id=policy_id,
-                    message=(
-                        "Internal-protocol tokens must not appear on the "
-                        "command queue; push policy IDs only."
-                    ),
-                )
-                return ctrl_data, commands
 
             idx = self._policy_id_to_idx.get(policy_id)
             if idx is None:
@@ -341,9 +340,9 @@ if __name__ == "__main__":
     print(
         "Listening on",
         ctrl.command_queue,
-        "— push a policy ID with:",
+        "— push a policy ID (matching mcp_g1/policies.yaml) with:",
     )
-    print(f"  redis-cli RPUSH {ctrl.command_queue} 'wave'")
+    print(f"  redis-cli RPUSH {ctrl.command_queue} 'video_017'")
     while True:
         data = ctrl.get_data()
         _, cmds = ctrl.process_triggers(data)
