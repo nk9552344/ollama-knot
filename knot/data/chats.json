@@ -1,3 +1,65 @@
 [
-  
+  {
+    "id": "c209e834-d557-4b45-b4a0-cf45bf7b8f5c",
+    "title": "list me all the policies availabe using the mcp se",
+    "model": "qwen3.5:4b",
+    "systemPromptId": null,
+    "mcpServerIds": [
+      "53ee7d43-f50b-48ad-b803-3965275cbb6a"
+    ],
+    "think": true,
+    "messages": [
+      {
+        "role": "user",
+        "content": "list me all the policies availabe using the mcp server"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "thinking": "The user wants to list all available policies from the MCP server. I have a tool called \"unitree_g1_controls__list_policies\" that does exactly this - it lists all available policies without requiring any parameters. This is straightforward and doesn't require waiting for events or executing anything yet.\n\nLet me call this function with no required parameters since there are none specified as needed in the schema."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_20xbjcuj",
+            "type": "function",
+            "function": {
+              "name": "unitree_g1_controls__list_policies",
+              "arguments": "{}"
+            }
+          }
+        ],
+        "_meta": {
+          "calls": {
+            "call_20xbjcuj": {
+              "server": "unitree g1 controls",
+              "displayName": "list_policies",
+              "args": {},
+              "status": "success",
+              "result": "{\n  \"id\": \"video_017\",\n  \"name\": \"squats policy\",\n  \"description\": \"This policy makes the Unitree G1 robot perform squats.\\n\"\n}\n{\n  \"id\": \"video_033\",\n  \"name\": \"walking policy\",\n  \"description\": \"This policy is used to walk the Unitree G1 robot. Takes some input parameters and produces a walking gait.\\n\"\n}"
+            }
+          }
+        }
+      },
+      {
+        "role": "tool",
+        "content": "{\n  \"id\": \"video_017\",\n  \"name\": \"squats policy\",\n  \"description\": \"This policy makes the Unitree G1 robot perform squats.\\n\"\n}\n{\n  \"id\": \"video_033\",\n  \"name\": \"walking policy\",\n  \"description\": \"This policy is used to walk the Unitree G1 robot. Takes some input parameters and produces a walking gait.\\n\"\n}",
+        "tool_call_id": "call_20xbjcuj",
+        "_meta": {
+          "server": "unitree g1 controls",
+          "displayName": "list_policies",
+          "status": "success"
+        }
+      },
+      {
+        "role": "assistant",
+        "content": "Here are all available policies on the server:\n\n| ID | Name | Description |\n|----|------|-------------|\n| video_017 | squats policy | This policy makes the Unitree G1 robot perform squats. |\n| video_033 | walking policy | This policy is used to walk the Unitree G1 robot. It takes some input parameters and produces a walking gait. |\n\nYou can use these policies by providing their ID (e.g., `video_017` or `video_033`) when you want to queue them for execution via the MCP server.",
+        "thinking": "The tool has returned two policies available on the server:\n1. ID: video_017 - Name: squats policy - Description: Makes the Unitree G1 robot perform squats\n2. ID: video_033 - Name: walking policy - Description: Used to walk the Unitree G1 robot, takes input parameters and produces a walking gait\n\nI should present this information clearly to the user in a readable format."
+      }
+    ],
+    "createdAt": "2026-06-26T12:11:19.292Z",
+    "updatedAt": "2026-06-26T12:26:34.665Z"
+  }
 ]

@@ -11,13 +11,13 @@
 # (see docker-compose.yml) or point POLICY_REGISTRY_PATH at it.
 
 policies:
-  - id: walk_policy_unitree_g1
+  - id: video_017
+    name: squats policy
+    description: >
+      This policy makes the Unitree G1 robot perform squats.
+  
+  - id: video_033
     name: walking policy
     description: >
       This policy is used to walk the Unitree G1 robot.
       Takes some input parameters and produces a walking gait.
-
-  - id: squats_policy_unitree_g1
-    name: squats policy
-    description: >
-      This policy makes the Unitree G1 robot perform squats.
