@@ -71,6 +71,8 @@ web_modules/
 !.env.sample
 !.env.example
 
+/knot/data
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
