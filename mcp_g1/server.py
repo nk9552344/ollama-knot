@@ -155,6 +155,48 @@ def execute_policy(policy_id: str) -> dict[str, Any]:
     }
 
 
+@mcp.tool()
+def execute_policies(policy_ids: list[str]) -> dict[str, Any]:
+    """
+    Queue multiple policies for execution in order.
+    """
+
+    if not isinstance(policy_ids, list) or not policy_ids:
+        return {
+            "status": "error",
+            "message": "policy_ids must be a non-empty list.",
+        }
+
+    policies = load_registry()
+
+    known_ids = {
+        policy["id"]
+        for policy in policies
+        if "id" in policy
+    }
+
+    unknown = [
+        policy_id
+        for policy_id in policy_ids
+        if policy_id not in known_ids
+    ]
+
+    if unknown:
+        return {
+            "status": "error",
+            "message": f"Unknown policies: {unknown}",
+        }
+
+    redis_client.rpush(COMMAND_QUEUE_NAME, *policy_ids)
+
+    return {
+        "status": "ok",
+        "policy_ids": policy_ids,
+        "count": len(policy_ids),
+        "queue": COMMAND_QUEUE_NAME,
+    }
+
+
 def read_recent_events(limit: int = 200) -> list[dict[str, Any]]:
     raw_events = redis_client.lrange(
         EVENT_QUEUE_NAME,
