@@ -28,8 +28,13 @@ Outbound events (``policy:events``) — JSON schema consumed by the MCP server's
 
     {"timestamp": <float>, "type": <str>, "policy_id": <str>, "message": <str>}
 
-Event types: ``ready``, ``policy_started``, ``policy_completed``,
-``policy_failed``, ``shutdown``, ``motion_reset``.
+Event types: ``ready``, ``policy_queued``, ``policy_started``,
+``policy_completed``, ``policy_failed``, ``shutdown``, ``motion_reset``.
+
+* ``policy_queued`` is published by this controller every time a policy ID is
+  successfully BLPOP-ed from the command queue (before it's dispatched). This
+  lets you confirm the receive side is alive from ``redis-cli MONITOR``
+  without reading pipeline logs.
 
 Scheduling
 ==========
@@ -68,6 +73,12 @@ from robojudo.controller.ctrl_cfgs import McpRedisCtrlCfg
 
 logger = logging.getLogger(__name__)
 
+# Default queue names — must match ``mcp_g1/server.py`` and
+# ``RoboJuDo/mcp_server/server.py`` (both default to the same strings). These
+# are the final fallback if neither the cfg nor any env var is set.
+DEFAULT_COMMAND_QUEUE = "policy:commands"
+DEFAULT_EVENT_QUEUE = "policy:events"
+
 
 @ctrl_registry.register
 class McpRedisCtrl(Controller):
@@ -77,16 +88,20 @@ class McpRedisCtrl(Controller):
         super().__init__(cfg_ctrl=cfg_ctrl, env=env, device=device)
 
         # Queue names — ROBOJUDO_* env vars match test_client.py; legacy
-        # COMMAND_QUEUE_NAME / EVENT_QUEUE_NAME are also accepted for back-compat.
+        # COMMAND_QUEUE_NAME / EVENT_QUEUE_NAME are also accepted for
+        # back-compat. Final fallback is the module-level default constant
+        # so that even an unconfigured controller talks to the right queues.
         self.command_queue = (
             os.getenv("ROBOJUDO_COMMAND_QUEUE")
             or os.getenv("COMMAND_QUEUE_NAME")
             or cfg_ctrl.command_queue
+            or DEFAULT_COMMAND_QUEUE
         )
         self.event_queue = (
             os.getenv("ROBOJUDO_EVENT_QUEUE")
             or os.getenv("EVENT_QUEUE_NAME")
             or cfg_ctrl.event_queue
+            or DEFAULT_EVENT_QUEUE
         )
         self.redis_url = self._resolve_redis_url(cfg_ctrl)
 
@@ -242,10 +257,6 @@ class McpRedisCtrl(Controller):
         if self._pending_kick:
             self._pending_kick = False
             commands.append("[POLICY_MIMIC]")
-            logger.info(
-                "[McpRedisCtrl] [EXECUTE]  policy_id=%r → emitting [POLICY_MIMIC]",
-                self._policy_in_flight,
-            )
             return ctrl_data, commands
 
         # Stage 1: emit '[POLICY_SWITCH],N' for the primed policy.
@@ -257,46 +268,35 @@ class McpRedisCtrl(Controller):
             commands.append(f"[POLICY_SWITCH],{idx}")
             self._publish_event("policy_started", policy_id=policy_id)
             logger.info(
-                "[McpRedisCtrl] [SWITCH]   policy_id=%r idx=%d → emitting [POLICY_SWITCH],%d",
-                policy_id,
-                idx,
-                idx,
+                "[McpRedisCtrl] Dispatching policy %r (idx=%d).", policy_id, idx
             )
             return ctrl_data, commands
 
         # Idle: pop the next queued policy ID — but only once we're back in
         # loco AND the mimic→loco interpolation hold has elapsed.
-        if self._policy_in_flight is None and self._inbound:
-            if self._loco_hold_remaining > 0:
-                logger.debug(
-                    "[McpRedisCtrl] [HOLD_WAIT] %d steps until next policy (pending=%d)",
-                    self._loco_hold_remaining,
-                    len(self._inbound),
+        if (
+            self._policy_in_flight is None
+            and self._loco_hold_remaining == 0
+            and self._inbound
+        ):
+            policy_id = self._inbound.popleft()
+            idx = self._policy_id_to_idx.get(policy_id)
+            if idx is None:
+                logger.warning(
+                    "[McpRedisCtrl] Unknown policy id %r. Known: %s",
+                    policy_id,
+                    list(self._policy_id_to_idx),
+                )
+                self._publish_event(
+                    "policy_failed",
+                    policy_id=policy_id,
+                    message=(
+                        f"Unknown policy id {policy_id!r}. "
+                        f"Known: {list(self._policy_id_to_idx)}"
+                    ),
                 )
             else:
-                policy_id = self._inbound.popleft()
-                logger.info(
-                    "[McpRedisCtrl] [DEQUEUE]  policy_id=%r popped from inbound (remaining=%d)",
-                    policy_id,
-                    len(self._inbound),
-                )
-                idx = self._policy_id_to_idx.get(policy_id)
-                if idx is None:
-                    logger.warning(
-                        "[McpRedisCtrl] [UNKNOWN]  policy_id=%r not registered. Known: %s",
-                        policy_id,
-                        list(self._policy_id_to_idx),
-                    )
-                    self._publish_event(
-                        "policy_failed",
-                        policy_id=policy_id,
-                        message=(
-                            f"Unknown policy id {policy_id!r}. "
-                            f"Known: {list(self._policy_id_to_idx)}"
-                        ),
-                    )
-                else:
-                    self._pending_switch = (policy_id, idx)
+                self._pending_switch = (policy_id, idx)
 
         return ctrl_data, commands
 
@@ -317,8 +317,8 @@ class McpRedisCtrl(Controller):
                     completed = self._policy_in_flight
                     self._policy_in_flight = None
                     logger.info(
-                        "[McpRedisCtrl] [COMPLETE]  policy_id=%r → [POLICY_LOCO] received, "
-                        "loco hold starting (%d steps, pending=%d)",
+                        "[McpRedisCtrl] [COMPLETE] policy_id=%r → [POLICY_LOCO] "
+                        "received, loco hold starting (%d steps, pending=%d)",
                         completed,
                         self.loco_transition_hold_steps,
                         len(self._inbound),
@@ -326,7 +326,8 @@ class McpRedisCtrl(Controller):
                     self._publish_event("policy_completed", policy_id=completed)
                 else:
                     logger.info(
-                        "[McpRedisCtrl] [LOCO]      [POLICY_LOCO] received (no policy in flight)"
+                        "[McpRedisCtrl] [LOCO]     [POLICY_LOCO] received "
+                        "(no policy in flight)"
                     )
                 # Start (or restart) the hold so the next queued policy waits
                 # for the mimic→loco interpolation in PolicyInterpManager to
@@ -334,7 +335,7 @@ class McpRedisCtrl(Controller):
                 self._loco_hold_remaining = self.loco_transition_hold_steps
             elif cmd == "[SHUTDOWN]":
                 logger.info(
-                    "[McpRedisCtrl] [SHUTDOWN]  received, in_flight=%r",
+                    "[McpRedisCtrl] [SHUTDOWN] received, in_flight=%r",
                     self._policy_in_flight or "",
                 )
                 self._publish_event(
@@ -354,13 +355,15 @@ class McpRedisCtrl(Controller):
     def _inbound_worker_safe(self):
         """Top-level guard: catches any otherwise-silent crash in the worker
         and logs a full traceback. Daemon threads die silently by default;
-        this is the most common cause of "RPUSH works but nothing pops"."""
+        this is the most common cause of RPUSH succeeding while nothing
+        pops from the command queue.
+        """
         try:
             self._inbound_worker()
         except BaseException:
             logger.critical(
-                "[McpRedisCtrl] Inbound worker CRASHED — no more policies will "
-                "be popped from %r. Traceback:\n%s",
+                "[McpRedisCtrl] [WORKER_CRASH] Inbound worker crashed — no more "
+                "policies will be popped from %r. Traceback:\n%s",
                 self.command_queue,
                 traceback.format_exc(),
             )
@@ -373,13 +376,15 @@ class McpRedisCtrl(Controller):
 
     def _inbound_worker(self):
         """Block on BLPOP for each policy ID. BLPOP is preferred over LPOP
-        polling because:
-          * It shows up in ``redis-cli MONITOR`` as a client subscription,
-            making it obvious from the outside that the consumer is alive.
-          * Lower CPU and sub-millisecond dispatch latency.
-          * The 1-second timeout keeps us responsive to ``self._stop``.
+        polling because it shows up in redis-cli MONITOR as a client
+        subscription (making it obvious from the outside that the consumer
+        is alive), has lower CPU, and gives sub-millisecond dispatch latency.
+        The 1-second timeout keeps us responsive to self._stop.
+
+        Every successful pop also publishes a 'policy_queued' event to the
+        event queue so the dispatch is visible end-to-end in MONITOR.
         """
-        _last_listen_log: float = 0.0
+        last_listen_log = 0.0
         while not self._stop:
             client = self._redis_client
             if client is None:
@@ -401,19 +406,22 @@ class McpRedisCtrl(Controller):
                 # Timeout — queue empty. Re-log every 30 s so the user can
                 # confirm the worker is alive without flooding the log.
                 now = time.time()
-                if now - _last_listen_log >= 30.0:
+                if now - last_listen_log >= 30.0:
                     logger.info(
                         "[McpRedisCtrl] [LISTEN]   waiting on %r (queue empty)…",
                         self.command_queue,
                     )
-                    _last_listen_log = now
+                    last_listen_log = now
                 continue
 
             # decode_responses=True → result is (queue_name: str, value: str).
             _queue_name, raw = result
             text = str(raw).strip()
             if not text:
-                logger.warning("[McpRedisCtrl] [POP]      ignoring empty item from %r", self.command_queue)
+                logger.warning(
+                    "[McpRedisCtrl] [POP]      ignoring empty item from %r",
+                    self.command_queue,
+                )
                 continue
 
             self._inbound.append(text)
@@ -423,7 +431,18 @@ class McpRedisCtrl(Controller):
                 self.command_queue,
                 len(self._inbound),
             )
-            _last_listen_log = 0.0  # reset so LISTEN logs again once queue drains
+            # User-requested: publish a `policy_queued` event for every
+            # successful pop so the receive side is auditable from MONITOR
+            # without having to read the pipeline logs.
+            self._publish_event(
+                "policy_queued",
+                policy_id=text,
+                message=(
+                    f"Popped from {self.command_queue}; "
+                    f"inbound_pending={len(self._inbound)}"
+                ),
+            )
+            last_listen_log = 0.0  # reset so LISTEN logs again once queue drains
 
     # ─────────────── Event publishing ───────────────
 
@@ -459,20 +478,24 @@ class McpRedisCtrl(Controller):
             )
         except RedisError as e:
             logger.warning(
-                "[McpRedisCtrl] [EVENT_ERR] could not publish %r: %s", event_type, e
+                "[McpRedisCtrl] [EVENT_ERR] could not publish %r: %s",
+                event_type,
+                e,
             )
 
 
 if __name__ == "__main__":
     # Standalone smoke test — no pipeline, no env. Verifies the Redis bridge
-    # end-to-end against `mcp_g1/server.py`:
+    # end-to-end against either MCP server:
     #
-    #   1. python mcp_redis_ctrl.py                       (in this shell)
-    #   2. python ../../../mcp_g1/server.py               (or run the MCP tool)
-    #   3. redis-cli RPUSH policy:commands video_017      (or call execute_policy)
+    #   1. python -m robojudo.controller.mcp_redis_ctrl    (in this shell)
+    #   2. redis-cli RPUSH policy:commands video_017       (in another shell)
     #
-    # You should see the controller log "Popped policy id 'video_017'" and
-    # emit '[POLICY_SWITCH],0' then '[POLICY_MIMIC]'.
+    # You should see the controller log:
+    #   [POP]      policy_id='video_017' from 'policy:commands' (inbound=1)
+    #   [POLICY_SWITCH],0
+    #   [POLICY_MIMIC]
+    #   [COMPLETE] policy_id='video_017' …
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
