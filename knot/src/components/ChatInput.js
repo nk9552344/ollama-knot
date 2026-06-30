@@ -5,6 +5,48 @@ import { Send, Square } from "lucide-react";
 import { useStore } from "@/store";
 import { StatusDot } from "./StatusDot";
 
+function McpPill({ pill, toneClass }) {
+  const [open, setOpen] = useState(false);
+  const hasTools = pill.tools && pill.tools.length > 0;
+  return (
+    <span
+      className="relative"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <span
+        title={!hasTools ? (pill.title || pill.label) : undefined}
+        className={`inline-flex cursor-default items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${toneClass}`}
+      >
+        <StatusDot status={pill.status} />
+        {pill.label}
+        {hasTools && (
+          <span className="font-normal opacity-40">· {pill.tools.length}</span>
+        )}
+      </span>
+      {open && hasTools && (
+        <div className="absolute bottom-full left-0 z-50 mb-1.5 w-64 max-w-xs rounded-lg border border-border bg-bg-overlay shadow-xl">
+          <div className="border-b border-border px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+            {pill.label} · {pill.tools.length} tool{pill.tools.length !== 1 ? "s" : ""}
+          </div>
+          <div className="max-h-52 overflow-y-auto px-3 py-2 space-y-2">
+            {pill.tools.map((t) => (
+              <div key={t.name}>
+                <code className="text-[11px] text-accent">{t.name}</code>
+                {t.description && (
+                  <p className="mt-0.5 text-[10px] leading-tight text-text-muted">
+                    {t.description}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 /**
  * Pill: { label, icon?, tone?: 'default'|'accent'|'warning'|'danger', status? }
  */
@@ -84,15 +126,17 @@ export function ChatInput({
                 accent: "bg-accent/15 text-accent",
                 warning: "bg-status-red/10 text-status-red",
               };
+              const toneClass = tones[pill.tone || "default"];
+              // MCP server pills (have a `status` field) get the interactive tooltip.
+              if (pill.status !== undefined) {
+                return <McpPill key={idx} pill={pill} toneClass={toneClass} />;
+              }
               return (
                 <span
                   key={idx}
                   title={pill.title || pill.label}
-                  className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-                    tones[pill.tone || "default"]
-                  }`}
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${toneClass}`}
                 >
-                  {pill.status && <StatusDot status={pill.status} />}
                   {pill.label}
                 </span>
               );

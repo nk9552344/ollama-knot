@@ -30,9 +30,11 @@ function ChatPageInner() {
   const systemPrompts = useStore((s) => s.systemPrompts);
   const mcpServers = useStore((s) => s.mcpServers);
   const mcpHealth = useStore((s) => s.mcpHealth);
+  const mcpToolCache = useStore((s) => s.mcpToolCache);
   const ollamaHealth = useStore((s) => s.ollamaHealth);
   const sendMessage = useStore((s) => s.sendMessage);
   const cancelStreaming = useStore((s) => s.cancelStreaming);
+  const fetchMcpServerTools = useStore((s) => s.fetchMcpServerTools);
   const mcpStreamStatus = useStore(
     (s) => s.mcpStreamStatus?.[activeChatId] || null,
   );
@@ -66,6 +68,14 @@ function ChatPageInner() {
     lastMsg?.thinking,
     showThinking,
   ]);
+
+  // Pre-populate tool tooltips as soon as a chat is selected.
+  useEffect(() => {
+    if (!activeChat) return;
+    for (const id of activeChat.mcpServerIds || []) {
+      fetchMcpServerTools(id);
+    }
+  }, [activeChat?.id]);
 
   const closeNewChatModal = () => {
     setShowNewChatModal(false);
@@ -105,6 +115,7 @@ function ChatPageInner() {
         label: server.name,
         status,
         title: `MCP ${server.name}: ${status}`,
+        tools: mcpToolCache[server.name] || [],
       });
     }
     return pills;

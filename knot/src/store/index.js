@@ -19,6 +19,7 @@ export const useStore = create((set, get) => ({
   mcpServers: [],
   systemPrompts: [],
   models: [],
+  mcpToolCache: {}, // { [serverName]: [{ name, description }] } — persists for session
 
   // Health state
   ollamaHealth: HEALTH_INITIAL, // { status: 'online'|'offline'|'checking'|'unknown', checkedAt, details }
@@ -419,6 +420,14 @@ export const useStore = create((set, get) => ({
                 message: event.message,
                 toolCount: event.toolCount,
               });
+              if (event.status === "ready" && Array.isArray(event.tools)) {
+                set({
+                  mcpToolCache: {
+                    ...get().mcpToolCache,
+                    [event.server]: event.tools,
+                  },
+                });
+              }
               break;
             case "new_turn":
               // No-op on the client — the store auto-creates a fresh
@@ -453,6 +462,22 @@ export const useStore = create((set, get) => ({
   },
 
   setPendingInputText: (pendingInputText) => set({ pendingInputText }),
+
+  // Pre-fetch tool list for a server from Redis cache (or live MCP on miss).
+  // Called on chat selection so tooltips are populated before the first message.
+  fetchMcpServerTools: async (serverId) => {
+    const server = get().mcpServers.find((s) => s.id === serverId);
+    if (!server) return;
+    if (get().mcpToolCache[server.name]) return; // already cached in store
+    try {
+      const res = await fetch(`/api/mcp-servers/${serverId}/tools`);
+      if (!res.ok) return;
+      const { tools } = await res.json();
+      if (Array.isArray(tools)) {
+        set({ mcpToolCache: { ...get().mcpToolCache, [server.name]: tools } });
+      }
+    } catch { /* non-critical */ }
+  },
 
   // MCP Server actions
   fetchMcpServers: async () => {

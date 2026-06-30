@@ -98,9 +98,16 @@ redis_client = redis.Redis.from_url(
     decode_responses=True,
 )
 
+# In-memory policy cache — policies.yaml is static at runtime; reading it on
+# every tool call wastes disk I/O and YAML parsing time.
+_policy_cache: list[dict[str, Any]] | None = None
+
 
 def load_registry() -> list[dict[str, Any]]:
-    """Load policy registry."""
+    """Load policy registry (cached after first read)."""
+    global _policy_cache
+    if _policy_cache is not None:
+        return _policy_cache
 
     if not REGISTRY_PATH.exists():
         raise FileNotFoundError(
@@ -117,6 +124,7 @@ def load_registry() -> list[dict[str, Any]]:
             "Registry must contain a top-level 'policies' list."
         )
 
+    _policy_cache = policies
     return policies
 
 
@@ -232,28 +240,36 @@ def wait_for_event(timeout_s: float = 30.0) -> dict[str, Any]:
     start_time = time.monotonic()
     cutoff_timestamp = time.time()
 
+    # Track queue length with LLEN (O(1)) instead of reading all events on
+    # every poll. Only fetch new items when the length actually increases.
+    baseline_len = redis_client.llen(EVENT_QUEUE_NAME)
+
     while time.monotonic() - start_time < timeout_s:
+        current_len = redis_client.llen(EVENT_QUEUE_NAME)
 
-        events = read_recent_events()
-
-        for event in events:
-
-            timestamp = float(
-                event.get("timestamp", 0)
+        if current_len > baseline_len:
+            new_raw = redis_client.lrange(
+                EVENT_QUEUE_NAME, baseline_len, -1
             )
+            baseline_len = current_len
 
-            if timestamp > cutoff_timestamp:
+            for raw in new_raw:
+                try:
+                    event = json.loads(raw)
+                    if isinstance(event, dict):
+                        if float(event.get("timestamp", 0)) > cutoff_timestamp:
+                            return {
+                                "status": "ok",
+                                "event": event,
+                                "waited_s": round(
+                                    time.monotonic() - start_time,
+                                    3,
+                                ),
+                            }
+                except Exception:
+                    continue
 
-                return {
-                    "status": "ok",
-                    "event": event,
-                    "waited_s": round(
-                        time.monotonic() - start_time,
-                        3,
-                    ),
-                }
-
-        time.sleep(0.5)
+        time.sleep(0.05)
 
     return {
         "status": "timeout",

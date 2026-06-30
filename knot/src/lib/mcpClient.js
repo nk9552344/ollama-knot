@@ -25,8 +25,14 @@ import { buildAuthHeaders } from "@/lib/mcpAuth";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const CLIENT_INFO = { name: "MCP Studio", version: "0.1.0" };
-const REQUEST_TIMEOUT_MS = 30_000;
-const ENDPOINT_DISCOVERY_TIMEOUT_MS = 20_000;
+const REQUEST_TIMEOUT_MS = 10_000;
+const ENDPOINT_DISCOVERY_TIMEOUT_MS = 5_000;
+
+// Caches the sessionId (or null for stateless servers) per server URL after a
+// successful initialize handshake. Eliminates 2 HTTP round-trips on every
+// subsequent tool call. Cleared automatically when the server signals that the
+// session is invalid so the next call re-initializes cleanly.
+const sessionInitCache = new Map();
 
 function authHeaders(server) {
   return buildAuthHeaders(server?.auth) || {};
@@ -526,37 +532,45 @@ async function runWithTransport(server, transport, fn) {
 
   // Streamable HTTP path.
   let sessionId = null;
-  try {
-    const init = await httpRpcCall(server, "initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: CLIENT_INFO,
-    });
-    sessionId = init.sessionId;
-    await httpRpcNotify(
-      server,
-      "notifications/initialized",
-      {},
-      { sessionId },
-    ).catch(() => {});
-  } catch (err) {
-    const pinned = transportOverride(server);
-    const looksLikeSse =
-      /closed the SSE stream before responding|did not respond to JSON-RPC over the POST stream/i.test(
-        err?.message || "",
+
+  if (sessionInitCache.has(server.url)) {
+    // Reuse cached sessionId — skip the initialize + notifications/initialized
+    // round-trips entirely (saves 2 HTTP requests per tool call).
+    sessionId = sessionInitCache.get(server.url);
+  } else {
+    try {
+      const init = await httpRpcCall(server, "initialize", {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: CLIENT_INFO,
+      });
+      sessionId = init.sessionId ?? null;
+      await httpRpcNotify(
+        server,
+        "notifications/initialized",
+        {},
+        { sessionId },
+      ).catch(() => {});
+      sessionInitCache.set(server.url, sessionId);
+    } catch (err) {
+      const pinned = transportOverride(server);
+      const looksLikeSse =
+        /closed the SSE stream before responding|did not respond to JSON-RPC over the POST stream/i.test(
+          err?.message || "",
+        );
+
+      // Strong SSE signal → switch transport entirely.
+      if (!pinned && looksLikeSse) {
+        return runWithTransport(server, "sse", fn);
+      }
+
+      // Otherwise: many stateless servers don't implement initialize at all.
+      // Don't make this fatal — proceed without a session id and let
+      // tools/list either succeed or surface a clearer error.
+      console.warn(
+        `MCP "${server.name}": initialize failed (continuing without session): ${err.message}`,
       );
-
-    // Strong SSE signal → switch transport entirely.
-    if (!pinned && looksLikeSse) {
-      return runWithTransport(server, "sse", fn);
     }
-
-    // Otherwise: many stateless servers don't implement initialize at all.
-    // Don't make this fatal — proceed without a session id and let
-    // tools/list either succeed or surface a clearer error.
-    console.warn(
-      `MCP "${server.name}": initialize failed (continuing without session): ${err.message}`,
-    );
   }
 
   const adapter = {
@@ -574,7 +588,16 @@ async function runWithTransport(server, transport, fn) {
     },
   };
 
-  return await fn(adapter);
+  try {
+    return await fn(adapter);
+  } catch (err) {
+    // Server signalled that the cached session is no longer valid — evict so
+    // the next call re-runs the initialize handshake.
+    if (/not initialized|invalid session|session.*expired/i.test(err?.message || "")) {
+      sessionInitCache.delete(server.url);
+    }
+    throw err;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

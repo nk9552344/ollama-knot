@@ -32,6 +32,16 @@ export function readStore(name) {
   }
 }
 
+export async function readStoreAsync(name) {
+  try {
+    const filePath = path.join(DATA_DIR, `${name}.json`);
+    const data = await fs.promises.readFile(filePath, "utf-8");
+    return JSON.parse(data);
+  } catch {
+    return [];
+  }
+}
+
 export function writeStore(name, data) {
   try {
     const filePath = path.join(DATA_DIR, `${name}.json`);

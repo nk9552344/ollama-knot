@@ -19,7 +19,8 @@
  *   { type: "done" }
  */
 
-import { readStore } from "@/lib/store";
+import { readStoreAsync } from "@/lib/store";
+import { getRedis } from "@/lib/redis";
 import {
   mcpCallTool,
   mcpListTools,
@@ -33,6 +34,8 @@ export const maxDuration = 300; // up to 5 minutes for long tool loops
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
 const MAX_TURNS = 8;
+
+const TOOLS_CACHE_TTL_S = 3600; // 1 hour — tool lists don't change at runtime
 
 function sseEvent(obj) {
   return `data: ${JSON.stringify(obj)}\n\n`;
@@ -187,14 +190,18 @@ export async function POST(request) {
     return Response.json({ error: "chatId is required" }, { status: 400 });
   }
 
-  const chats = readStore("chats");
+  // Read all required stores in parallel to avoid sequential disk I/O.
+  const [chats, allServers, systemPrompts] = await Promise.all([
+    readStoreAsync("chats"),
+    readStoreAsync("mcp-servers"),
+    readStoreAsync("system-prompts"),
+  ]);
+
   const chat = chats.find((c) => c.id === chatId);
   if (!chat) {
     return Response.json({ error: "Chat not found" }, { status: 404 });
   }
 
-  const allServers = readStore("mcp-servers");
-  const systemPrompts = readStore("system-prompts");
   const sysPromptObj = chat.systemPromptId
     ? systemPrompts.find((p) => p.id === chat.systemPromptId)
     : null;
@@ -223,15 +230,33 @@ export async function POST(request) {
         const tools = [];
         const toolMap = new Map(); // fullName → { server, displayName }
 
-        for (const server of selectedServers) {
-          if (abortSignal.aborted) return;
-          send({
-            type: "mcp_status",
-            server: server.name,
-            status: "listing",
-          });
+        const redis = getRedis();
+        const mcpCacheKey = (s) => `${s.id}||${s.url}`;
 
-          const { tools: serverTools, error } = await mcpListTools(server);
+        // Check Redis first for each server, fetch from MCP only on cache miss.
+        // All servers are checked/fetched in parallel.
+        const discoveries = await Promise.all(
+          selectedServers.map(async (server) => {
+            const redisKey = `mcp:tools:${mcpCacheKey(server)}`;
+            try {
+              const raw = await redis.get(redisKey);
+              if (raw) return { server, serverTools: JSON.parse(raw), error: null };
+            } catch { /* Redis unavailable — fall through to live fetch */ }
+
+            // Cache miss: announce and fetch live
+            send({ type: "mcp_status", server: server.name, status: "listing" });
+            const { tools: serverTools, error } = await mcpListTools(server);
+            if (!error) {
+              try {
+                await redis.set(redisKey, JSON.stringify(serverTools), "EX", TOOLS_CACHE_TTL_S);
+              } catch { /* best-effort */ }
+            }
+            return { server, serverTools: serverTools || [], error };
+          }),
+        );
+
+        for (const { server, serverTools, error } of discoveries) {
+          if (abortSignal.aborted) return;
           if (error) {
             send({
               type: "mcp_status",
@@ -241,22 +266,23 @@ export async function POST(request) {
             });
             continue;
           }
-
           const slug = serverSlug(server);
           for (const t of serverTools) {
             const tool = toOllamaTool(server, t, { namespacePrefix: slug });
             tools.push(tool);
-            toolMap.set(tool.function.name, {
-              server,
-              displayName: t.name,
-            });
+            toolMap.set(tool.function.name, { server, displayName: t.name });
           }
-
           send({
             type: "mcp_status",
             server: server.name,
             status: "ready",
             toolCount: serverTools.length,
+            // Send slim tool metadata so the frontend can show tool tooltips
+            // without any extra API round-trip.
+            tools: serverTools.map((t) => ({
+              name: t.name,
+              description: t.description || "",
+            })),
           });
         }
 
@@ -281,6 +307,7 @@ export async function POST(request) {
             model: chat.model,
             messages,
             stream: true,
+            keep_alive: -1, // keep model loaded in VRAM indefinitely
           };
           if (tools.length > 0) reqBody.tools = tools;
           // Always send an explicit `think` value: if we omit it, Ollama
@@ -397,65 +424,55 @@ export async function POST(request) {
           };
           messages.push(assistantToolMsg);
 
-          for (const tc of assistantToolMsg.tool_calls) {
-            const fnName = tc.function.name;
-            // arguments is already an object after normalisation above.
-            const fnArgs = tc.function.arguments || {};
+          // Execute all tool calls in parallel; Promise.all preserves order
+          // so tool result messages are appended in the correct sequence.
+          const toolResults = await Promise.all(
+            assistantToolMsg.tool_calls.map(async (tc) => {
+              const fnName = tc.function.name;
+              const fnArgs = tc.function.arguments || {};
+              const mapping = toolMap.get(fnName);
+              const displayName = mapping?.displayName || fnName;
+              const serverName = mapping?.server?.name || "unknown";
 
-            const mapping = toolMap.get(fnName);
-            const displayName = mapping?.displayName || fnName;
-            const serverName = mapping?.server?.name || "unknown";
-
-            send({
-              type: "tool_call",
-              id: tc.id,
-              server: serverName,
-              displayName,
-              fullName: fnName,
-              args: fnArgs,
-              status: "running",
-            });
-
-            if (!mapping) {
-              const errMsg = `Tool "${fnName}" is not known to any configured MCP server.`;
-              messages.push({
-                role: "tool",
-                content: errMsg,
-                tool_call_id: tc.id,
-              });
               send({
-                type: "tool_result",
+                type: "tool_call",
                 id: tc.id,
                 server: serverName,
                 displayName,
-                status: "error",
-                content: errMsg,
-                error: errMsg,
+                fullName: fnName,
+                args: fnArgs,
+                status: "running",
               });
-              continue;
-            }
 
-            let resultText;
-            let isError = false;
-            try {
-              const mcpRes = await mcpCallTool(
-                mapping.server,
-                mapping.displayName,
-                fnArgs,
-              );
-              resultText = mcpResultToText(mcpRes);
-              isError = Boolean(mcpRes?.isError);
-            } catch (err) {
-              resultText = err.message || "Tool call failed";
-              isError = true;
-            }
+              if (!mapping) {
+                const errMsg = `Tool "${fnName}" is not known to any configured MCP server.`;
+                return { tc, resultText: errMsg, isError: true, serverName, displayName };
+              }
 
+              let resultText;
+              let isError = false;
+              try {
+                const mcpRes = await mcpCallTool(
+                  mapping.server,
+                  mapping.displayName,
+                  fnArgs,
+                );
+                resultText = mcpResultToText(mcpRes);
+                isError = Boolean(mcpRes?.isError);
+              } catch (err) {
+                resultText = err.message || "Tool call failed";
+                isError = true;
+              }
+              return { tc, resultText, isError, serverName, displayName };
+            }),
+          );
+
+          for (const { tc, resultText, isError, serverName, displayName } of toolResults) {
             messages.push({
               role: "tool",
               content: resultText || "(empty result)",
               tool_call_id: tc.id,
             });
-
             send({
               type: "tool_result",
               id: tc.id,
