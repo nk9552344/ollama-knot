@@ -1,157 +1,68 @@
 # =============================================================================
-# ollama-knot —
+# ollama-knot — modular compose
 #
-# Brings up everything you need to chat with a local LLM and have it call the
-# Unitree G1 policy MCP server:
+# Every service is fully independent. Remove any block to use a local install.
+# All inter-service URLs are configured via .env — change a URL there, not here.
 #
-#   * mcp-studio   – the Next.js "knot" UI                  http://localhost:3000
-#   * ollama       – local LLM runtime                       http://localhost:11434
-#   * mcp-g1       – Unitree G1 policy MCP server            http://localhost:8000/mcp
-#   * redis        – queue mcp-g1 pushes policies onto       localhost:6379
+# .env quick-start (copy to .env and adjust):
+#   REDIS_URL=redis://host.docker.internal:6379/0
+#   OLLAMA_URL=http://host.docker.internal:11434
+#   MCP_G1_URL=http://host.docker.internal:8000/mcp
 #
-# Docker Hub Images:
-#   neerajkumar1044/infosys-ollama-knot:latest
-#   neerajkumar1044/infosys-mcp-g1:latest
+# Services and their host ports:
+#   redis       → localhost:6379
+#   ollama      → localhost:11434
+#   mcp-g1      → localhost:8000
+#   mcp-studio  → localhost:3000
 #
-# ──────────────────────────────────────────────────────────────────────────────
-# OLLAMA MODES
-# ──────────────────────────────────────────────────────────────────────────────
+# Swap a service for a local install:
+#   1. Remove its block from this file.
+#   2. Set the matching env var in .env to point to your local instance.
 #
-# MODE 1 — Docker Ollama (default)
-#   Ollama runs as a container managed by this Compose file.
-#   No local installation required.
-#   • Keep the `ollama` service block below as-is (un-commented).
-#   • Keep OLLAMA_HOST: http://ollama:11434 in mcp-studio.
-#   • Keep `ollama: condition: service_started` in mcp-studio depends_on.
-#
-# MODE 2 — Locally installed Ollama
-#   Ollama is already running on your host machine (e.g. via `ollama serve`).
-#   • Comment out the entire `ollama` service block below.
-#   • In mcp-studio environment, comment out:
-#       OLLAMA_HOST: http://ollama:11434
-#     and uncomment ONE of the alternatives:
-#       macOS / Windows → OLLAMA_HOST: http://host.docker.internal:11434
-#       Linux           → OLLAMA_HOST: http://172.17.0.1:11434
-#         (or use the extra_hosts approach; see Linux note below)
-#   • In mcp-studio depends_on, comment out the `ollama` block.
-#
-# ──────────────────────────────────────────────────────────────────────────────
-# REDIS MODES
-# ──────────────────────────────────────────────────────────────────────────────
-#
-# 1. Default (Docker Redis)
-#    - Leave REDIS_URL as redis://redis:6379/0
-#    - Start all services normally
-#
-# 2. Host Redis (macOS / Windows)
-#    - Uncomment REDIS_URL=redis://host.docker.internal:6379/0
-#    - Comment redis dependency if desired
-#    - Optional: comment out redis service entirely
-#
-# 3. Host Redis (Linux)
-#    - Uncomment extra_hosts section
-#    - Uncomment REDIS_URL=redis://host.docker.internal:6379/0
-#
-# Quick commands
-# ──────────────
-#   docker compose pull
-#   docker compose up -d
-#   docker compose logs -f mcp-studio
+# Commands:
+#   docker compose up -d            # start all
+#   docker compose up -d mcp-g1    # start one service only
 #   docker compose down
-#   docker compose down -v
 # =============================================================================
 
 services:
-  mcp-studio:
-
-    # -------------------------------------------------------------------------
-    # LOCAL BUILD (keep for development)
-    # Uncomment if you want to build locally instead of pulling from Docker Hub
-    # -------------------------------------------------------------------------
-    # build:
-    #   context: ./knot
-    #   dockerfile: Dockerfile
-
-    # -------------------------------------------------------------------------
-    # DOCKER HUB IMAGE (recommended for deployment)
-    # -------------------------------------------------------------------------
-    image: neerajkumar1044/infosys-ollama-knot
-
-    container_name: knot
-    restart: unless-stopped
-
-    ports:
-      - "3000:3000"
-
-    environment:
-      # ── Ollama wiring ────────────────────────────────────────────────
-      # MODE 1 (default): Ollama running as a Docker container
-      OLLAMA_HOST: http://ollama:11434
-
-      # MODE 2: Ollama installed and running locally on the host machine
-      # macOS / Windows — Docker Desktop provides this magic hostname:
-      # OLLAMA_HOST: http://host.docker.internal:11434
-      #
-      # Linux — use the Docker bridge gateway IP instead:
-      # OLLAMA_HOST: http://172.17.0.1:11434
-      # (alternatively, uncomment extra_hosts below and keep host.docker.internal)
-
-      DATA_DIR: /app/data
-      NEXT_TELEMETRY_DISABLED: "1"
-
-      # ── MCP server bootstrap ────────────────────────────────────────
-      MCP_BOOTSTRAP_ID: g1-policies
-      MCP_BOOTSTRAP_NAME: unitree g1 controls
-      MCP_BOOTSTRAP_URL: http://mcp-g1:8000/mcp
-      MCP_BOOTSTRAP_TRANSPORT: http
-      MCP_BOOTSTRAP_DESCRIPTION: Queue Unitree G1 policies via Redis.
-
-    volumes:
-      - ./knot/data:/app/data
-
-    depends_on:
-      # MODE 1 (default): wait for the Ollama container to start
-      ollama:
-        condition: service_started
-
-      # MODE 2: comment out the block above when using a local Ollama install
-
-      mcp-g1:
-        condition: service_started
-
-    # -------------------------------------------------------------------------
-    # Linux only (MODE 2 local Ollama):
-    # Lets containers resolve "host.docker.internal" to the host's bridge IP.
-    # Uncomment if using OLLAMA_HOST: http://host.docker.internal:11434 on Linux.
-    # -------------------------------------------------------------------------
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"
-
-    networks:
-      - knot
 
   # ---------------------------------------------------------------------------
-  # OLLAMA SERVICE
+  # REDIS
+  # Remove this block → set REDIS_URL in .env to your local Redis instance.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: knot-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+
+  # ---------------------------------------------------------------------------
+  # OLLAMA  (local LLM runtime)
+  # Remove this block → set OLLAMA_URL in .env to your local Ollama instance.
   #
-  # MODE 1 (default): keep this entire block active.
-  # MODE 2 (local Ollama): comment out this entire block.
+  # GPU acceleration (NVIDIA / Jetson):
+  #   Requires nvidia-container-toolkit on the host.
+  #   Uncomment the `deploy` block below to enable.
   # ---------------------------------------------------------------------------
   ollama:
     image: ollama/ollama:latest
-
     container_name: ollama
     restart: unless-stopped
-
     ports:
-      - "11434:11434"
-
+      - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      # Hint to use all available GPUs (ignored when no GPU present)
+      OLLAMA_NUM_GPU: ${OLLAMA_NUM_GPU:-999}
 
-    networks:
-      - knot
-
-    # Uncomment for NVIDIA GPU hosts
+    # ── NVIDIA GPU ────────────────────────────────────────────────────────────
+    # Uncomment to enable GPU. Requires: nvidia-container-toolkit
+    # https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
     # deploy:
     #   resources:
     #     reservations:
@@ -159,129 +70,61 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+    # ─────────────────────────────────────────────────────────────────────────
 
+  # ---------------------------------------------------------------------------
+  # MCP-G1  (Unitree G1 policy server)
+  # Remove this block → set MCP_G1_URL in .env to your local instance.
+  # ---------------------------------------------------------------------------
   mcp-g1:
-
-    # -------------------------------------------------------------------------
-    # LOCAL BUILD (keep for development)
-    # Uncomment if you want to build locally instead of pulling from Docker Hub
-    # -------------------------------------------------------------------------
+    image: neerajkumar1044/infosys-mcp-g1
     # build:
     #   context: ./mcp_g1
-    #   dockerfile: Dockerfile
-
-    # -------------------------------------------------------------------------
-    # DOCKER HUB IMAGE (recommended for deployment)
-    # -------------------------------------------------------------------------
-    image: neerajkumar1044/infosys-mcp-g1
-
     container_name: mcp-g1
     restart: unless-stopped
-
     ports:
-      - "8000:8000"
-
+      - "${MCP_G1_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux: resolves host machine IP
     environment:
       POLICY_REGISTRY_PATH: /app/policies.yaml
-
-      # ==============================================================
-      # OPTION 1 (DEFAULT)
-      # Use Redis container from this compose file
-      # ==============================================================
-      REDIS_URL: redis://redis:6379/0
-
-      # ==============================================================
-      # OPTION 2 (macOS / Windows)
-      # Use Redis installed on host machine
-      # Comment the line above and uncomment below
-      # ==============================================================
-      # REDIS_URL: redis://host.docker.internal:6379/0
-
-      # ==============================================================
-      # OPTION 3 (recommended)
-      # Control Redis via .env file
-      # Create .env:
-      #
-      # REDIS_URL=redis://host.docker.internal:6379/0
-      #
-      # Then uncomment below and comment the lines above
-      # ==============================================================
-      # REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-
-      # Command queue: MCP RPUSHes plain policy IDs here, robot LPOPs them.
-      COMMAND_QUEUE_NAME: policy:commands
-      # Event queue: robot publishes structured JSON status events here.
-      EVENT_QUEUE_NAME: policy:events
-
+      REDIS_URL: ${REDIS_URL:-redis://host.docker.internal:6379/0}
+      COMMAND_QUEUE_NAME: ${COMMAND_QUEUE_NAME:-policy:commands}
+      EVENT_QUEUE_NAME: ${EVENT_QUEUE_NAME:-policy:events}
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8000"
-
       MCP_STATELESS_HTTP: "true"
       MCP_JSON_RESPONSE: "true"
-
     volumes:
       - ${POLICY_REGISTRY_FILE:-./mcp_g1/policies.yaml}:/app/policies.yaml:ro
 
-    depends_on:
-
-      # -----------------------------------------------------------------------
-      # REQUIRED when using Docker Redis
-      # -----------------------------------------------------------------------
-      redis:
-        condition: service_started
-
-      # -----------------------------------------------------------------------
-      # OPTIONAL when using Host Redis
-      # Comment the above block if Redis runs on host machine
-      # -----------------------------------------------------------------------
-
-    # -------------------------------------------------------------------------
-    # Linux only:
-    # Required when connecting to host Redis
-    # -------------------------------------------------------------------------
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"
-
-    networks:
-      - knot
-
-  redis:
-
-    # -------------------------------------------------------------------------
-    # Docker Redis
-    #
-    # Host machine access:
-    #   localhost:6379
-    #
-    # Docker container access:
-    #   redis:6379
-    #
-    # If using host-installed Redis instead:
-    #   You can comment this entire service.
-    # -------------------------------------------------------------------------
-
-    image: redis:7-alpine
-
-    container_name: knot-redis
+  # ---------------------------------------------------------------------------
+  # MCP-STUDIO  (Next.js UI)
+  # Remove this block to run the UI locally with `npm run dev`.
+  # ---------------------------------------------------------------------------
+  mcp-studio:
+    image: neerajkumar1044/infosys-ollama-knot
+    # build:
+    #   context: ./knot
+    container_name: knot
     restart: unless-stopped
-
     ports:
-      # Makes Redis available to BOTH:
-      # 1. Host machine
-      # 2. Docker containers
-      - "6379:6379"
-
+      - "${STUDIO_PORT:-3000}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux: resolves host machine IP
+    environment:
+      OLLAMA_HOST: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      DATA_DIR: /app/data
+      NEXT_TELEMETRY_DISABLED: "1"
+      MCP_BOOTSTRAP_ID: g1-policies
+      MCP_BOOTSTRAP_NAME: unitree g1 controls
+      MCP_BOOTSTRAP_URL: ${MCP_G1_URL:-http://host.docker.internal:8000/mcp}
+      MCP_BOOTSTRAP_TRANSPORT: http
+      MCP_BOOTSTRAP_DESCRIPTION: Queue Unitree G1 policies via Redis.
     volumes:
-      - redis_data:/data
-
-    networks:
-      - knot
+      - ./knot/data:/app/data
 
 volumes:
   ollama_data:
   redis_data:
-
-networks:
-  knot:
-    driver: bridge
